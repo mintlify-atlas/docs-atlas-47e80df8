@@ -1,0 +1,141 @@
+{
+  "projectType": "cli-tool",
+  "projectName": "SysWhispers4",
+  "projectDescription": "Python-based syscall stub generator for Windows AV/EDR evasion via direct and indirect system calls",
+  "theme": "aspen",
+  "primaryColor": "#9b9b9c",
+  "lightColor": "#d4d4d4",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/ssn-resolution",
+              "concepts/invocation-methods",
+              "concepts/evasion-techniques",
+              "concepts/architecture-support"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/basic-usage",
+              "guides/advanced-evasion",
+              "guides/integration-msvc",
+              "guides/integration-mingw",
+              "guides/presets"
+            ]
+          },
+          {
+            "group": "Command Reference",
+            "pages": [
+              "cli/command-reference",
+              "cli/ssn-resolution-methods",
+              "cli/invocation-methods",
+              "cli/evasion-options"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Generated API",
+            "pages": [
+              "api/overview",
+              "api/initialization",
+              "api/memory-functions",
+              "api/process-thread-functions",
+              "api/file-functions",
+              "api/token-functions",
+              "api/evasion-helpers"
+            ]
+          },
+          {
+            "group": "Function Categories",
+            "pages": [
+              "api/supported-functions"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Advanced",
+        "groups": [
+          {
+            "group": "Techniques Deep Dive",
+            "pages": [
+              "advanced/freshycalls",
+              "advanced/syscalls-from-disk",
+              "advanced/recycled-gate",
+              "advanced/hw-breakpoint",
+              "advanced/sleep-encryption",
+              "advanced/stack-spoofing"
+            ]
+          },
+          {
+            "group": "Detection & Evasion",
+            "pages": [
+              "advanced/edr-detection",
+              "advanced/recommended-configs",
+              "advanced/etw-ti-limitations"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "advanced/project-structure",
+              "advanced/syscall-table-updates"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "8 SSN resolution methods (Static, FreshyCalls, Hell's/Halo's/Tartarus' Gate, SyscallsFromDisk, RecycledGate, HW Breakpoint)",
+    "4 invocation methods (Embedded, Indirect, Randomized, Egg Hunt)",
+    "Multi-architecture support (x64, x86, WoW64, ARM64)",
+    "Advanced evasion: XOR-encrypted SSNs, call stack spoofing, sleep encryption",
+    "EDR bypass techniques: ETW/AMSI patching, ntdll unhooking, anti-debugging",
+    "64 supported NT functions covering memory, process, thread, file, and token operations",
+    "Multiple compiler support (MSVC/MASM, MinGW, Clang)",
+    "8 presets for common use cases (injection, evasion, token manipulation, etc.)"
+  ],
+  "publicApiSurface": [
+    "syswhispers.py --preset <common|injection|evasion|token|stealth|file_ops|transaction|all>",
+    "syswhispers.py --functions <NtFunction1>,<NtFunction2>",
+    "syswhispers.py --method <embedded|indirect|randomized|egg>",
+    "syswhispers.py --resolve <static|freshycalls|hells_gate|halos_gate|tartarus|from_disk|recycled|hw_breakpoint>",
+    "syswhispers.py --obfuscate --encrypt-ssn --stack-spoof",
+    "syswhispers.py --etw-bypass --amsi-bypass --unhook-ntdll",
+    "syswhispers.py --anti-debug --sleep-encrypt",
+    "syswhispers.py --arch <x64|x86|wow64|arm64>",
+    "syswhispers.py --compiler <msvc|mingw|clang>",
+    "syswhispers.py --list-functions",
+    "syswhispers.py --list-presets",
+    "SW4_Initialize()",
+    "SW4_NtAllocateVirtualMemory()",
+    "SW4_NtCreateThreadEx()",
+    "SW4_NtWriteVirtualMemory()",
+    "SW4_PatchEtw()",
+    "SW4_PatchAmsi()",
+    "SW4_UnhookNtdll()",
+    "SW4_AntiDebugCheck()",
+    "SW4_SleepEncrypt()",
+    "SW4_HatchEggs()"
+  ]
+}
