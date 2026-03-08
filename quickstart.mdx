@@ -40,7 +40,7 @@ Make sure you've completed the [Installation](/installation) steps before procee
       | `injection` | Process/shellcode injection via APC, threads, sections | 20 |
       | `evasion` | AV/EDR evasion queries and operations | 15 |
       | `token` | Token manipulation and privilege escalation | 6 |
-      | `stealth` | Maximum evasion: injection + evasion + unhooking | 31 |
+      | `stealth` | Maximum evasion: injection + evasion + unhooking | 32 |
       | `file_ops` | File I/O via NT syscalls | 7 |
       | `transaction` | Process doppelganging / transaction rollback | 7 |
       | `all` | Every supported function | 64 |
@@ -55,7 +55,7 @@ Make sure you've completed the [Installation](/installation) steps before procee
     ```
     
     Output:
-    ```
+    ```text
     SW4Syscalls.asm         # MASM syscall stubs (x64 assembly)
     SW4Syscalls.c           # Runtime SSN resolution + helper functions
     SW4Syscalls.h           # Function prototypes + API declarations

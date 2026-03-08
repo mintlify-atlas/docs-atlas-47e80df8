@@ -99,7 +99,7 @@ SysWhispers4 builds on the lineage of:
 
 ## Architecture Overview
 
-```
+```text
 Your Application
        ↓
   SW4_NtAllocateVirtualMemory()  ← Generated stub
@@ -115,12 +115,12 @@ Your Application
 
 <Note>
 **Traditional API call path** (hooked by EDR):
-```
+```text
 Your App → VirtualAllocEx → kernel32.dll → ntdll.dll (HOOKED) → kernel
 ```
 
 **SysWhispers4 path** (bypasses hooks):
-```
+```text
 Your App → SW4_NtAllocateVirtualMemory → syscall → kernel
 ```
 </Note>
