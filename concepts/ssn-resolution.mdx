@@ -1,0 +1,151 @@
+---
+title: 'SSN Resolution Methods'
+description: 'Overview of System Service Number resolution techniques for bypassing EDR hooks'
+icon: 'hashtag'
+---
+
+## What is SSN Resolution?
+
+System Service Numbers (SSNs) are the numeric identifiers that Windows uses to route syscalls to the correct kernel function. Each NT function has a unique SSN that can vary across Windows versions.
+
+When your code executes a syscall, the SSN must be placed in the `eax` register (or `w8` on ARM64) before the `syscall` instruction:
+
+```asm
+mov eax, 0x18          ; SSN for NtAllocateVirtualMemory (Win10 x64)
+syscall                ; Kernel entry with SSN in eax
+```
+
+**SSN resolution** is the process of determining the correct SSN value for each NT function at compile time or runtime.
+
+<Info>
+SSNs change between Windows versions. `NtAllocateVirtualMemory` is `0x18` on Windows 10 21H2, but `0x16` on Windows 7 SP1.
+</Info>
+
+## Why Multiple Resolution Methods?
+
+AV/EDR products place **inline hooks** on NT functions in `ntdll.dll` to monitor syscalls. Different resolution techniques vary in their ability to extract SSNs from hooked environments:
+
+- **Static methods** embed SSN tables at generation time — fast but detectable
+- **Dynamic methods** extract SSNs from ntdll at runtime — resistant to hooks but slower
+- **Advanced methods** use techniques like hardware breakpoints or clean disk copies — maximum evasion
+
+## Available Methods
+
+SysWhispers4 provides **8 different SSN resolution strategies**, each with different tradeoffs:
+
+<CardGroup cols={2}>
+  <Card title="Static" icon="table" href="/cli/ssn-resolution-methods#static">
+    Embedded j00ru table. Fastest, no runtime parsing. Low stealth.
+  </Card>
+  <Card title="Hell's Gate" icon="door-open" href="/cli/ssn-resolution-methods#hells-gate">
+    Read SSN from opcode bytes. Fast but fails when hooked.
+  </Card>
+  <Card title="Halo's Gate" icon="circle-dot" href="/cli/ssn-resolution-methods#halos-gate">
+    Neighbor scan (±8 stubs) when target is hooked.
+  </Card>
+  <Card title="Tartarus' Gate" icon="fire" href="/cli/ssn-resolution-methods#tartarus-gate">
+    Detects E9/FF25/EB/CC hooks. Scans ±16 neighbors.
+  </Card>
+  <Card title="FreshyCalls" icon="sort" href="/advanced/freshycalls">
+    Sort by VA — doesn't read function bytes. Default method.
+  </Card>
+  <Card title="SyscallsFromDisk" icon="hard-drive" href="/advanced/syscalls-from-disk">
+    Maps clean ntdll from `\KnownDlls\`. Bypasses ALL hooks.
+  </Card>
+  <Card title="RecycledGate" icon="recycle" href="/advanced/recycled-gate">
+    FreshyCalls + opcode validation. Most resilient.
+  </Card>
+  <Card title="HW Breakpoint" icon="bug" href="/advanced/hw-breakpoint">
+    Debug registers + VEH. Captures SSN at execution.
+  </Card>
+</CardGroup>
+
+## Quick Comparison
+
+| Method | Hook Resistance | Speed | Stealth | Use Case |
+|--------|:---------------:|:-----:|:-------:|----------|
+| Static | None | Fastest | Low | Quick testing, CTF |
+| Hell's Gate | Low | Fast | Medium | Lightly-hooked environments |
+| Halo's Gate | Medium | Fast | Medium | Moderate EDR presence |
+| Tartarus' Gate | High | Fast | High | Heavily-hooked EDR |
+| **FreshyCalls** | **Very High** | **Medium** | **High** | **Recommended default** |
+| SyscallsFromDisk | Maximum | Slow | Very High | Maximum evasion |
+| RecycledGate | Maximum | Medium | Very High | Production red team ops |
+| HW Breakpoint | Maximum | Slow | Very High | Advanced analysis evasion |
+
+<Tip>
+**Recommended:** Start with `--resolve freshycalls` (the default). Upgrade to `recycled` or `from_disk` if you encounter advanced EDR products.
+</Tip>
+
+## Choosing the Right Method
+
+### For Quick Testing / CTF
+```bash
+python syswhispers.py --preset common --resolve static
+```
+Embedded table, no runtime overhead.
+
+### For Standard Red Team Operations
+```bash
+python syswhispers.py --preset injection --resolve freshycalls
+```
+Default method. Excellent hook resistance, fast runtime.
+
+### For Heavily-Hooked Environments
+```bash
+python syswhispers.py --preset stealth --resolve recycled
+```
+Double-validation (VA-sort + opcode check) ensures correct SSNs.
+
+### For Maximum Evasion
+```bash
+python syswhispers.py --preset stealth --resolve from_disk --unhook-ntdll
+```
+Maps clean ntdll from disk, completely bypassing all inline hooks.
+
+## Runtime Initialization
+
+Dynamic resolution methods require calling `SW4_Initialize()` at startup:
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Resolve SSNs at runtime
+    if (!SW4_Initialize()) {
+        // Failed to resolve SSNs
+        return 1;
+    }
+
+    // SSNs are now resolved — safe to call syscalls
+    PVOID base = NULL;
+    SIZE_T size = 0x1000;
+    SW4_NtAllocateVirtualMemory(
+        GetCurrentProcess(), &base, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+    );
+
+    return 0;
+}
+```
+
+<Warning>
+Static resolution (`--resolve static`) does **not** require `SW4_Initialize()` — SSNs are embedded at compile time.
+</Warning>
+
+## Learn More
+
+<CardGroup cols={2}>
+  <Card title="Detailed Method Reference" icon="book" href="/cli/ssn-resolution-methods">
+    Complete documentation for all 8 resolution methods with usage examples.
+  </Card>
+  <Card title="FreshyCalls Deep Dive" icon="microscope" href="/advanced/freshycalls">
+    In-depth explanation of the sort-by-VA technique and why it works.
+  </Card>
+  <Card title="RecycledGate Analysis" icon="shield" href="/advanced/recycled-gate">
+    How RecycledGate combines multiple techniques for maximum reliability.
+  </Card>
+  <Card title="Hardware Breakpoint Method" icon="microchip" href="/advanced/hw-breakpoint">
+    Advanced VEH-based SSN extraction using debug registers.
+  </Card>
+</CardGroup>

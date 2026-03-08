@@ -1,0 +1,729 @@
+---
+title: Project Structure
+description: Understanding SysWhispers4's codebase architecture and module organization
+---
+
+## Overview
+
+SysWhispers4 is a Python-based code generator that produces C/ASM syscall stubs. Understanding the project structure helps you:
+
+- Extend functionality (add new syscalls, resolution methods, etc.)
+- Debug generation issues
+- Contribute to the project
+- Customize for specific needs
+
+---
+
+## Directory Layout
+
+```
+SysWhispers4/
+├── syswhispers.py              # CLI entry point
+├── core/                        # Core generation logic
+│   ├── __init__.py             # Package initialization
+│   ├── models.py               # Enums, dataclasses, type definitions
+│   ├── generator.py            # Main code generation engine (~1900 lines)
+│   ├── obfuscator.py           # Obfuscation: junk code, eggs, XOR
+│   └── utils.py                # Hashing, data loading, helpers
+├── data/                        # Static data files
+│   ├── prototypes.json         # 64 NT function signatures
+│   ├── presets.json            # 8 function presets (common, injection, etc.)
+│   ├── syscalls_nt_x64.json   # x64 syscall number table
+│   └── syscalls_nt_x86.json   # x86 syscall number table
+├── scripts/                     # Maintenance scripts
+│   └── update_syscall_table.py # Fetch latest syscall numbers from j00ru
+├── examples/                    # Integration examples
+│   └── example_injection.c     # Reference injection code
+├── .gitignore                   # Git ignore rules
+└── README.md                    # Main documentation
+```
+
+---
+
+## Core Modules
+
+### `syswhispers.py` - CLI Entry Point
+
+**Purpose:** Command-line interface, argument parsing, orchestration
+
+**Key responsibilities:**
+- Parse command-line arguments (`--preset`, `--method`, `--resolve`, etc.)
+- Validate function names against `prototypes.json`
+- Load preset configurations from `presets.json`  
+- Instantiate `Generator` class
+- Write output files (`.h`, `.c`, `.asm`/`.c` stubs)
+
+**Main flow:**
+```python
+def main():
+    args = parse_arguments()              # Parse CLI args
+    functions = resolve_functions(args)   # Expand presets → function list
+    ssn_table = load_syscall_table(args)  # Load data/syscalls_nt_*.json
+    
+    gen = Generator(
+        functions=functions,
+        arch=args.arch,
+        method=args.method,
+        resolve=args.resolve,
+        # ... evasion flags
+    )
+    
+    gen.generate()                        # Generate all code
+    gen.write_files(args.out_dir)        # Write to disk
+```
+
+**When to modify:**
+- Adding new CLI flags
+- Changing default behaviors
+- Adding new output file types
+
+---
+
+### `core/models.py` - Type Definitions
+
+**Purpose:** Enums and dataclasses representing configuration options
+
+**Key types:**
+
+```python
+class Architecture(Enum):
+    X64 = "x64"      # 64-bit Windows (syscall)
+    X86 = "x86"      # 32-bit Windows (sysenter)
+    WOW64 = "wow64"  # 32-bit on 64-bit (Heaven's Gate)
+    ARM64 = "arm64"  # Windows on ARM (SVC #0)
+
+class ResolveMethod(Enum):
+    STATIC = "static"              # Embedded j00ru table
+    HELLS_GATE = "hells_gate"      # Read mov eax, <SSN> opcode
+    HALOS_GATE = "halos_gate"      # Neighbor scan ±8
+    TARTARUS = "tartarus"          # Detect JMP/CALL hooks, ±16
+    FRESHYCALLS = "freshycalls"    # Sort exports by VA
+    FROM_DISK = "from_disk"        # Map clean ntdll from \KnownDlls
+    RECYCLED = "recycled"          # FreshyCalls + opcode validation
+    HW_BREAKPOINT = "hw_breakpoint" # DR registers + VEH
+
+class InvocationMethod(Enum):
+    EMBEDDED = "embedded"      # Direct syscall in your code
+    INDIRECT = "indirect"      # JMP to ntdll gadget
+    RANDOMIZED = "randomized"  # Random gadget per call (pool of 64)
+    EGG = "egg"                # Egg hunt (no syscall on disk)
+
+class Compiler(Enum):
+    MSVC = "msvc"      # Microsoft Visual C++ (MASM)
+    MINGW = "mingw"    # MinGW GCC (GAS inline)
+    CLANG = "clang"    # Clang (GAS inline)
+
+@dataclass
+class SyscallFunction:
+    name: str                    # e.g., "NtAllocateVirtualMemory"
+    return_type: str             # e.g., "NTSTATUS"
+    parameters: List[Parameter]  # List of (type, name) tuples
+    ssn: Optional[int]           # Syscall number (if using static resolution)
+```
+
+**When to modify:**
+- Adding new architectures (e.g., RISC-V)
+- Adding new resolution methods
+- Adding new invocation techniques
+
+---
+
+### `core/generator.py` - Code Generation Engine
+
+**Purpose:** Core logic for generating C/ASM code
+
+**Size:** ~1900 lines (largest module)
+
+**Key classes:**
+
+```python
+class Generator:
+    def __init__(self, functions, arch, method, resolve, compiler, **evasion_flags):
+        self.functions = functions          # List[SyscallFunction]
+        self.arch = Architecture(arch)
+        self.method = InvocationMethod(method)
+        self.resolve = ResolveMethod(resolve)
+        self.compiler = Compiler(compiler)
+        self.evasion = evasion_flags        # obfuscate, encrypt_ssn, etc.
+        
+    def generate(self):
+        self.gen_types_header()    # SW4Syscalls_Types.h
+        self.gen_header()          # SW4Syscalls.h
+        self.gen_c_file()          # SW4Syscalls.c
+        if self.compiler == Compiler.MSVC:
+            self.gen_asm_file()    # SW4Syscalls.asm (MASM)
+        else:
+            self.gen_stubs_file()  # SW4Syscalls_stubs.c (GAS inline)
+```
+
+**Key methods:**
+
+| Method | Generates | Example |
+|--------|-----------|--------|
+| `gen_types_header()` | NT type definitions | `typedef struct _UNICODE_STRING {...}` |
+| `gen_header()` | Function prototypes | `NTSTATUS SW4_NtAllocateVirtualMemory(...)` |
+| `gen_c_file()` | Runtime SSN resolution | `BOOL SW4_Initialize(void) {...}` |
+| `gen_asm_file()` | MASM syscall stubs | `SW4_NtAllocateVirtualMemory PROC` |
+| `gen_stubs_file()` | GAS inline stubs | `__asm__ volatile ("mov r10, rcx...")` |
+| `gen_ssn_table()` | Static SSN array | `DWORD SW4_SsnTable[] = {0x18, 0x50, ...}` |
+| `gen_gadget_pool()` | Indirect gadget array | `PVOID SW4_GadgetPool[64] = {...}` |
+| `gen_unhook_function()` | ntdll unhooking code | `SW4_UnhookNtdll()` |
+| `gen_etw_bypass()` | ETW patch function | `SW4_PatchEtw()` |
+| `gen_amsi_bypass()` | AMSI patch function | `SW4_PatchAmsi()` |
+| `gen_sleep_encrypt()` | Ekko sleep encryption | `SW4_SleepEncrypt(DWORD ms)` |
+
+**Architecture-specific code paths:**
+
+```python
+def gen_asm_stub(self, func: SyscallFunction):
+    if self.arch == Architecture.X64:
+        return self._gen_x64_stub(func)
+    elif self.arch == Architecture.X86:
+        return self._gen_x86_stub(func)
+    elif self.arch == Architecture.WOW64:
+        return self._gen_wow64_stub(func)  # Heaven's Gate
+    elif self.arch == Architecture.ARM64:
+        return self._gen_arm64_stub(func)  # SVC #0
+```
+
+**When to modify:**
+- Adding new NT functions (update `data/prototypes.json` first)
+- Implementing new evasion techniques
+- Supporting new architectures
+- Changing stub format/structure
+
+---
+
+### `core/obfuscator.py` - Obfuscation Module
+
+**Purpose:** Code obfuscation, junk injection, egg hunt, SSN encryption
+
+**Key functions:**
+
+```python
+def inject_junk_instructions(asm_code: str, intensity: int = 3) -> str:
+    """
+    Inject harmless junk instructions between real opcodes.
+    
+    Variants (14 total):
+    - nop
+    - xchg ax, ax
+    - lea r11, [r11]
+    - push 0x42; pop r11
+    - test r11d, 0xABh
+    - fnop
+    - ... and more
+    """
+    junk_variants = [
+        "nop",
+        "xchg ax, ax",
+        "lea r11, [r11]",
+        # ... 11 more
+    ]
+    # Randomly insert junk between lines
+    return obfuscated_code
+
+def generate_egg_marker() -> bytes:
+    """
+    Generate random 8-byte egg marker (replaces syscall opcode).
+    Must not collide with valid opcodes.
+    """
+    return os.urandom(8)
+
+def encrypt_ssn_table(ssn_table: List[int], xor_key: int) -> List[int]:
+    """
+    XOR-encrypt SSN values with compile-time random key.
+    """
+    return [ssn ^ xor_key for ssn in ssn_table]
+
+def randomize_stub_order(functions: List[SyscallFunction]) -> List[SyscallFunction]:
+    """
+    Shuffle function order to break signature matching.
+    Uses secure random.shuffle().
+    """
+    import random
+    shuffled = functions.copy()
+    random.shuffle(shuffled)
+    return shuffled
+```
+
+**When to modify:**
+- Adding new junk instruction variants
+- Implementing new obfuscation techniques (control flow flattening, string encryption, etc.)
+- Changing egg marker generation algorithm
+
+---
+
+### `core/utils.py` - Helper Functions
+
+**Purpose:** Hash functions, file I/O, data loading utilities
+
+**Key functions:**
+
+```python
+def djb2_hash(s: str) -> int:
+    """DJB2 string hash (used for function name hashing)."""
+    h = 5381
+    for c in s:
+        h = ((h << 5) + h) + ord(c)  # h * 33 + c
+    return h & 0xFFFFFFFF
+
+def crc32_hash(s: str) -> int:
+    """CRC32 hash."""
+    import zlib
+    return zlib.crc32(s.encode()) & 0xFFFFFFFF
+
+def fnv1a_hash(s: str) -> int:
+    """FNV-1a hash."""
+    h = 2166136261
+    for c in s:
+        h ^= ord(c)
+        h = (h * 16777619) & 0xFFFFFFFF
+    return h
+
+def load_json(path: Path) -> dict:
+    """Load JSON file with error handling."""
+    with open(path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+def write_file(path: Path, content: str) -> None:
+    """Write file with UTF-8 encoding."""
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write(content)
+```
+
+**When to modify:**
+- Adding new hash algorithms
+- Changing file encoding/format
+- Adding data validation logic
+
+---
+
+## Data Files
+
+### `data/prototypes.json` - Function Signatures
+
+**Format:**
+```json
+{
+  "NtAllocateVirtualMemory": {
+    "return_type": "NTSTATUS",
+    "parameters": [
+      {"type": "HANDLE", "name": "ProcessHandle"},
+      {"type": "PVOID*", "name": "BaseAddress"},
+      {"type": "ULONG_PTR", "name": "ZeroBits"},
+      {"type": "PSIZE_T", "name": "RegionSize"},
+      {"type": "ULONG", "name": "AllocationType"},
+      {"type": "ULONG", "name": "Protect"}
+    ]
+  },
+  ...
+}
+```
+
+**Total functions:** 64
+
+**Categories:**
+- Memory (8 functions)
+- Section/Mapping (4)
+- Process (10)
+- Thread (13)
+- Handle/Sync (10)
+- File (5)
+- Token (6)
+- Transaction (3)
+- Misc (5)
+
+**When to modify:**
+- Adding new NT functions
+- Fixing incorrect signatures (check [MSDN](https://docs.microsoft.com/en-us/windows/win32/api/) or ntdll headers)
+
+---
+
+### `data/presets.json` - Function Presets
+
+**Format:**
+```json
+{
+  "common": {
+    "description": "Common functions for process/thread/memory operations",
+    "functions": [
+      "NtAllocateVirtualMemory",
+      "NtFreeVirtualMemory",
+      ...
+    ]
+  },
+  "injection": { ... },
+  "evasion": { ... },
+  "token": { ... },
+  "stealth": { ... },
+  "file_ops": { ... },
+  "transaction": { ... },
+  "all": { ... }
+}
+```
+
+**Presets:**
+- `common` (25 functions)
+- `injection` (20)
+- `evasion` (15)
+- `token` (6)
+- `stealth` (32)
+- `file_ops` (7)
+- `transaction` (7)
+- `all` (64)
+
+**When to modify:**
+- Creating custom presets for specific use cases
+- Adjusting existing preset function lists
+
+---
+
+### `data/syscalls_nt_x64.json` - x64 Syscall Table
+
+**Format:**
+```json
+{
+  "_comment": "NT syscall numbers — generated by SysWhispers4/scripts/update_syscall_table.py",
+  "_source": "https://github.com/j00ru/windows-syscalls",
+  "_format": "FunctionName -> { build_key -> decimal_ssn }",
+  "_windows_builds": {
+    "7_sp1": "Windows 7 SP1",
+    "10240": "Windows 10 1507 (build 10240)",
+    "22000": "Windows 11 21H2 (build 22000)",
+    "26100": "Windows 11 24H2 (build 26100)",
+    ...
+  },
+  "NtAllocateVirtualMemory": {
+    "7_sp1": 24,
+    "10240": 24,
+    "14393": 24,
+    "22000": 24,
+    "26100": 24
+  },
+  ...
+}
+```
+
+**Coverage:**
+- Windows 7 SP1 → Windows 11 24H2
+- 20+ builds tracked
+- Auto-generated from [j00ru/windows-syscalls](https://github.com/j00ru/windows-syscalls)
+
+**When to update:**
+- New Windows build released (use `scripts/update_syscall_table.py`)
+- SSN changes detected
+
+---
+
+### `data/syscalls_nt_x86.json` - x86 Syscall Table
+
+Same format as x64, but for 32-bit Windows.
+
+**Key differences:**
+- Uses `sysenter` instead of `syscall`
+- SSN values differ from x64
+- Covers legacy Windows (NT 4.0, 2000, XP, etc.)
+
+---
+
+## Scripts
+
+### `scripts/update_syscall_table.py` - Table Updater
+
+**Purpose:** Fetch latest syscall numbers from j00ru's repository
+
+**Usage:**
+```bash
+# Update x64 table (default)
+python scripts/update_syscall_table.py
+
+# Update both x64 and x86
+python scripts/update_syscall_table.py --arch x64,x86
+
+# Update specific functions only
+python scripts/update_syscall_table.py --functions NtAllocateVirtualMemory,NtCreateThreadEx
+
+# Custom output path
+python scripts/update_syscall_table.py --out custom_table.json
+```
+
+**How it works:**
+1. Fetches CSV from `https://raw.githubusercontent.com/j00ru/windows-syscalls/master/x64/csv/nt.csv`
+2. Parses CSV columns (each column = Windows build)
+3. Maps human-readable build names to short keys (`"Windows 10 1909"` → `"18363"`)
+4. Converts hex SSN values to decimal
+5. Filters to `Nt*` functions only
+6. Writes JSON to `data/syscalls_nt_x64.json`
+
+**When to run:**
+- After new Windows build release (e.g., 25H2)
+- When j00ru updates his repository
+- Before generating stubs for new OS version
+
+See the [Syscall Table Updates](/advanced/syscall-table-updates) page for detailed workflow.
+
+---
+
+## Generated Output Files
+
+### MSVC (Default)
+
+```
+SW4Syscalls_Types.h    # NT type definitions (structures, enums)
+SW4Syscalls.h          # Function prototypes + SW4_Initialize() + evasion API
+SW4Syscalls.c          # Runtime SSN resolution + helper functions
+SW4Syscalls.asm        # MASM syscall stubs (x64/x86/WoW64)
+```
+
+### MinGW / Clang
+
+```
+SW4Syscalls_Types.h    # NT type definitions
+SW4Syscalls.h          # Function prototypes
+SW4Syscalls.c          # Runtime SSN resolution
+SW4Syscalls_stubs.c    # GAS inline assembly stubs
+```
+
+**Key difference:** GAS uses inline assembly in `.c` files instead of separate `.asm`
+
+---
+
+## Code Flow Example
+
+### User runs:
+```bash
+python syswhispers.py --preset common --method indirect --resolve freshycalls
+```
+
+### Execution flow:
+
+1. **`syswhispers.py`**
+   - Parse args: `preset="common"`, `method="indirect"`, `resolve="freshycalls"`
+   - Load `data/presets.json` → expand `"common"` to 25 function names
+   - Load `data/prototypes.json` → get signatures for those 25 functions
+   - Load `data/syscalls_nt_x64.json` → get SSN values (not used for FreshyCalls, but loaded for static fallback)
+
+2. **`core/generator.py`**
+   - Instantiate `Generator(functions=25, arch=X64, method=INDIRECT, resolve=FRESHYCALLS, compiler=MSVC)`
+   - Call `gen.generate()`:
+     - `gen_types_header()` → Create `SW4Syscalls_Types.h`
+     - `gen_header()` → Create `SW4Syscalls.h` with 25 function prototypes
+     - `gen_c_file()` → Create `SW4Syscalls.c`:
+       - Generate `SW4_Initialize()` with FreshyCalls logic (sort exports by VA)
+       - Generate `SW4_FindSyscallGadgets()` for indirect method (scan ntdll for `syscall;ret`)
+     - `gen_asm_file()` → Create `SW4Syscalls.asm`:
+       - For each function, generate indirect stub:
+         ```asm
+         SW4_NtAllocateVirtualMemory PROC
+             mov r10, rcx
+             mov eax, DWORD PTR [SW4_SsnTable + 0*4]  ; Load SSN from table
+             jmp QWORD PTR [SW4_SyscallGadget]        ; Jump to ntdll gadget
+         SW4_NtAllocateVirtualMemory ENDP
+         ```
+
+3. **`syswhispers.py` (file output)**
+   - Write 4 files to disk
+   - Print summary:
+     ```
+     [+] Generated 25 syscall stubs (x64, MSVC)
+     [+] Resolution: FreshyCalls (sort-by-VA)
+     [+] Invocation: Indirect (ntdll gadget)
+     [+] Files:
+         SW4Syscalls_Types.h
+         SW4Syscalls.h
+         SW4Syscalls.c
+         SW4Syscalls.asm
+     ```
+
+---
+
+## Extension Points
+
+### Adding a New Resolution Method
+
+1. **Add enum to `core/models.py`:**
+   ```python
+   class ResolveMethod(Enum):
+       # ... existing methods
+       MY_NEW_METHOD = "my_new_method"
+   ```
+
+2. **Implement logic in `core/generator.py`:**
+   ```python
+   def gen_c_file(self):
+       # ...
+       if self.resolve == ResolveMethod.MY_NEW_METHOD:
+           init_code += self._gen_my_new_method_code()
+   
+   def _gen_my_new_method_code(self):
+       return """
+       // Your SSN resolution logic here
+       for (int i = 0; i < num_functions; i++) {
+           SW4_SsnTable[i] = resolve_ssn_via_my_method(function_names[i]);
+       }
+       """
+   ```
+
+3. **Update CLI in `syswhispers.py`:**
+   ```python
+   parser.add_argument(
+       "-r", "--resolve",
+       choices=["static", "hells_gate", ..., "my_new_method"],
+       default="freshycalls"
+   )
+   ```
+
+### Adding a New Invocation Method
+
+Similar process:
+1. Add to `InvocationMethod` enum
+2. Implement stub generation in `_gen_x64_stub()` (or other arch methods)
+3. Update CLI
+
+### Adding a New Architecture
+
+1. Add to `Architecture` enum
+2. Implement `_gen_<arch>_stub()` method
+3. Update syscall instruction/register mappings
+4. Add syscall table JSON (if SSNs differ)
+
+---
+
+## Testing Your Changes
+
+### Unit Tests (Future)
+
+Currently no formal test suite. Recommended approach:
+
+```python
+# tests/test_generator.py
+import pytest
+from core.generator import Generator
+from core.models import Architecture, InvocationMethod, ResolveMethod
+
+def test_freshycalls_x64_embedded():
+    gen = Generator(
+        functions=["NtAllocateVirtualMemory"],
+        arch=Architecture.X64,
+        method=InvocationMethod.EMBEDDED,
+        resolve=ResolveMethod.FRESHYCALLS,
+        compiler=Compiler.MSVC,
+    )
+    gen.generate()
+    
+    # Verify output
+    assert "SW4_NtAllocateVirtualMemory PROC" in gen.asm_code
+    assert "mov r10, rcx" in gen.asm_code
+    assert "syscall" in gen.asm_code
+```
+
+### Integration Tests
+
+```bash
+# Generate stubs
+python syswhispers.py --preset common -o test_output/
+
+# Compile with MSVC
+cd test_output
+cl /c test.c SW4Syscalls.c SW4Syscalls.asm
+link test.obj SW4Syscalls.obj /OUT:test.exe
+
+# Run
+test.exe
+```
+
+---
+
+## Contributing Guidelines
+
+1. **Follow existing code style:**
+   - 4-space indentation
+   - Type hints for all functions
+   - Docstrings for public APIs
+
+2. **Update `prototypes.json` when adding functions:**
+   - Verify signature against MSDN or ntdll headers
+   - Test on multiple Windows versions
+
+3. **Run `update_syscall_table.py` before release:**
+   - Ensure SSN tables are current
+
+4. **Test on multiple configurations:**
+   - MSVC, MinGW, Clang
+   - x64, x86, WoW64, ARM64 (if applicable)
+   - All resolution methods
+   - All invocation methods
+
+5. **Document new features in README.md**
+
+---
+
+## Debugging Tips
+
+### Enable Verbose Output
+
+```bash
+python syswhispers.py --preset common --verbose
+```
+
+Shows detailed generation steps, loaded data, etc.
+
+### Inspect Generated Code
+
+Before compiling, review the generated `.c` and `.asm` files:
+
+```bash
+# Check initialization logic
+cat SW4Syscalls.c | grep -A 50 "SW4_Initialize"
+
+# Verify stub format
+cat SW4Syscalls.asm | grep -A 10 "NtAllocateVirtualMemory PROC"
+```
+
+### Use Debugger
+
+Set breakpoints in your compiled binary:
+
+```
+WinDbg> bp SW4_Initialize
+WinDbg> g
+WinDbg> k  # Check call stack
+WinDbg> dt SW4_SsnTable  # Inspect SSN table
+```
+
+---
+
+## Performance Profiling
+
+### Measure Initialization Time
+
+```c
+#include <windows.h>
+#include "SW4Syscalls.h"
+
+int main() {
+    LARGE_INTEGER freq, start, end;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&start);
+    
+    SW4_Initialize();
+    
+    QueryPerformanceCounter(&end);
+    double ms = (double)(end.QuadPart - start.QuadPart) * 1000.0 / freq.QuadPart;
+    printf("SW4_Initialize() took %.3f ms\n", ms);
+}
+```
+
+**Typical results:**
+- Static: ~0.001 ms (just loads from table)
+- FreshyCalls: ~0.2 ms (sorts ~500 exports)
+- From disk: ~5 ms (maps section, parses PE)
+
+---
+
+## Further Reading
+
+- [Syscall Table Updates](/advanced/syscall-table-updates) - Keep tables current
+- [Recommended Configurations](/advanced/recommended-configs) - Usage examples
+- [Contributing Guide](https://github.com/CyberSecurityUP/SysWhispers4/blob/main/CONTRIBUTING.md)

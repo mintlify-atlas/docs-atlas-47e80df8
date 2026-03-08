@@ -1,0 +1,296 @@
+---
+title: Initialization Functions
+description: Setup and initialization API for SysWhispers4 syscall resolution
+---
+
+## Overview
+
+Before using any SysWhispers4 syscall functions, you must initialize the SSN (System Call Number) resolution mechanism using `SW4_Initialize()`.
+
+## SW4_Initialize
+
+Resolves system call numbers for all generated NT functions using your chosen resolution method.
+
+```c
+BOOL SW4_Initialize(VOID);
+```
+
+### Returns
+
+- `TRUE` — Successfully resolved all SSNs
+- `FALSE` — Failed to resolve one or more SSNs
+
+### Description
+
+This function performs the following based on your `--resolve` method:
+
+| Resolution Method | What SW4_Initialize() Does |
+|-------------------|----------------------------|
+| `static` | Returns `TRUE` immediately (no runtime resolution needed) |
+| `hells_gate` | Parses ntdll export table, reads `mov eax, <SSN>` opcodes |
+| `halos_gate` | Like Hell's Gate, but scans ±8 neighbors if hook detected |
+| `tartarus` | Detects all hook patterns (E9/FF25/EB/CC), scans ±16 neighbors |
+| `freshycalls` | Sorts ntdll exports by VA, uses sorted index as SSN |
+| `from_disk` | Maps clean ntdll from `\KnownDlls\`, reads SSNs from pristine copy |
+| `recycled` | Combines FreshyCalls + opcode validation for maximum reliability |
+| `hw_breakpoint` | Uses debug registers (DR0-DR3) + VEH to capture SSNs |
+
+### Usage
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Initialize before any SW4_Nt* calls
+    if (!SW4_Initialize()) {
+        fprintf(stderr, "[!] SW4_Initialize failed\n");
+        return 1;
+    }
+
+    // Now you can use syscall functions
+    PVOID base = NULL;
+    SIZE_T size = 0x1000;
+    NTSTATUS status = SW4_NtAllocateVirtualMemory(
+        GetCurrentProcess(), &base, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+    );
+
+    return NT_SUCCESS(status) ? 0 : 1;
+}
+```
+
+### When to Call
+
+<Warning>
+  **Call order matters!** For best results:
+  
+  1. `SW4_UnhookNtdll()` (if using `--unhook-ntdll`) — removes hooks from ntdll
+  2. `SW4_Initialize()` — resolves SSNs from now-clean ntdll
+  3. `SW4_PatchEtw()` / `SW4_PatchAmsi()` (if using bypass features)
+</Warning>
+
+Example with unhooking:
+
+```c
+int main(void) {
+    // Step 1: Remove ALL hooks from ntdll first
+    SW4_UnhookNtdll();
+
+    // Step 2: NOW resolve SSNs from clean ntdll
+    if (!SW4_Initialize()) return 1;
+
+    // Step 3: Apply other evasion patches
+    SW4_PatchEtw();
+    SW4_PatchAmsi();
+
+    // Proceed...
+}
+```
+
+### Thread Safety
+
+<Warning>
+  `SW4_Initialize()` is **not thread-safe**. Call it exactly once from your main thread before creating additional threads.
+</Warning>
+
+### Performance
+
+| Resolution Method | Typical Time | Notes |
+|-------------------|--------------|-------|
+| `static` | Instant | No runtime parsing |
+| `hells_gate` | < 1ms | Fast export table scan |
+| `halos_gate` | < 2ms | Neighbor scanning overhead |
+| `tartarus` | < 2ms | More complex hook detection |
+| `freshycalls` | 1-3ms | Must sort all exports by VA |
+| `from_disk` | 5-15ms | Must map section from disk |
+| `recycled` | 2-5ms | FreshyCalls + validation |
+| `hw_breakpoint` | 10-50ms | VEH setup + per-function breakpoint triggering |
+
+## SW4_HatchEggs
+
+*Only generated when using `--method egg`*
+
+Replaces 8-byte egg markers in syscall stubs with actual `syscall` instructions at runtime.
+
+```c
+VOID SW4_HatchEggs(VOID);
+```
+
+### Description
+
+When using egg hunt invocation (`--method egg`):
+
+1. Syscall stubs contain random 8-byte markers instead of `syscall` (0F 05) on disk
+2. `SW4_HatchEggs()` scans the `.text` section for these markers
+3. Replaces each egg with `0F 05 90 90 90 90 90 90` (syscall + NOPs)
+4. Adjusts memory protection as needed
+
+**Result:** No `syscall` opcode appears in the binary on disk.
+
+### Usage
+
+```c
+int main(void) {
+    // Step 1: Hatch eggs (converts markers → syscall opcodes)
+    SW4_HatchEggs();
+
+    // Step 2: Resolve SSNs
+    if (!SW4_Initialize()) return 1;
+
+    // Now syscalls work normally
+    // ...
+}
+```
+
+### When to Use
+
+Egg hunt is useful when:
+
+- Static analysis tools flag `syscall` opcodes in your binary
+- You want to pass initial file scanning without triggering alerts
+- Combined with other obfuscation techniques
+
+<Note>
+  Egg hunt provides disk-time obfuscation only. Once hatched in memory, the `syscall` opcodes are visible to memory scanners.
+</Note>
+
+## Initialization Examples
+
+### Example 1: Minimal Setup (FreshyCalls)
+
+```c
+// Generated with: python syswhispers.py --preset common
+
+#include "SW4Syscalls.h"
+
+int main(void) {
+    if (!SW4_Initialize()) {
+        return 1;
+    }
+
+    // Use syscalls...
+    return 0;
+}
+```
+
+### Example 2: Maximum Evasion Setup
+
+```c
+// Generated with:
+// python syswhispers.py --preset stealth \
+//   --method randomized --resolve recycled \
+//   --unhook-ntdll --etw-bypass --amsi-bypass --anti-debug
+
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Remove all ntdll hooks
+    SW4_UnhookNtdll();
+
+    // Resolve SSNs (from now-clean ntdll)
+    if (!SW4_Initialize()) {
+        return 1;
+    }
+
+    // Apply evasion patches
+    SW4_PatchEtw();
+    SW4_PatchAmsi();
+
+    // Check for debuggers
+    if (!SW4_AntiDebugCheck()) {
+        // Debugger detected — abort
+        return 0;
+    }
+
+    // Proceed with operations...
+    return 0;
+}
+```
+
+### Example 3: Egg Hunt + Static SSNs
+
+```c
+// Generated with:
+// python syswhispers.py --preset injection \
+//   --method egg --resolve static
+
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Hatch eggs first (markers → syscall opcodes)
+    SW4_HatchEggs();
+
+    // Static SSNs: Initialize() returns TRUE immediately
+    SW4_Initialize();
+
+    // Use syscalls...
+    return 0;
+}
+```
+
+### Example 4: Hardware Breakpoint Resolution
+
+```c
+// Generated with:
+// python syswhispers.py --preset common \
+//   --resolve hw_breakpoint
+
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // HW breakpoint method is slower but most hook-resistant
+    printf("[*] Resolving SSNs via hardware breakpoints...\n");
+
+    if (!SW4_Initialize()) {
+        fprintf(stderr, "[!] Failed to set up VEH handler\n");
+        return 1;
+    }
+
+    printf("[+] All SSNs resolved\n");
+
+    // Use syscalls...
+    return 0;
+}
+```
+
+## Troubleshooting
+
+### SW4_Initialize() Returns FALSE
+
+**Possible causes:**
+
+1. **Ntdll is heavily hooked** — Try `--resolve from_disk` or `--resolve recycled`
+2. **Wrong architecture** — Ensure you're running x64 code on x64 Windows (or x86 on x86)
+3. **Corrupted ntdll** — Some packers/protectors modify ntdll structure
+4. **Debug build on production Windows** — SSN table may not match your Windows version
+
+**Solutions:**
+
+```c
+if (!SW4_Initialize()) {
+    // Try unhooking first
+    SW4_UnhookNtdll();
+
+    if (!SW4_Initialize()) {
+        fprintf(stderr, "[!] Initialization failed even after unhooking\n");
+        return 1;
+    }
+}
+```
+
+### Crashes During Initialize
+
+- **Check privileges:** Some resolution methods (e.g., `from_disk`) require reading `\KnownDlls\`
+- **SEH/VEH conflicts:** If using `hw_breakpoint`, ensure no other VEH handlers conflict
+- **Memory corruption:** Verify your compiler settings (MASM build customizations for MSVC)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Memory Functions" icon="memory" href="/api/memory-functions">
+    Allocate, read, write, and protect memory via syscalls
+  </Card>
+  <Card title="Evasion Helpers" icon="shield" href="/api/evasion-helpers">
+    SW4_PatchEtw, SW4_PatchAmsi, SW4_UnhookNtdll
+  </Card>
+</CardGroup>

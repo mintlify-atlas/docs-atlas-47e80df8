@@ -1,0 +1,607 @@
+---
+title: 'Command Reference'
+description: 'Complete CLI reference for SysWhispers4 with all flags and options'
+icon: 'terminal'
+---
+
+## Overview
+
+SysWhispers4 is a command-line tool that generates NT syscall stubs with advanced EDR evasion capabilities. This reference documents all available command-line options and their usage.
+
+## Basic Syntax
+
+```bash
+python syswhispers.py [OPTIONS]
+```
+
+<Note>
+At least one of `--preset` or `--functions` is required.
+</Note>
+
+## Function Selection
+
+You must specify which NT functions to include in the generated output using one or both of these options:
+
+### `--preset` / `-p`
+
+Use predefined function sets optimized for common scenarios.
+
+**Syntax:** `--preset PRESET[,PRESET,...]`
+
+**Type:** String (comma-separated list)
+
+**Available Presets:**
+
+| Preset | Functions | Description |
+|--------|-----------|-------------|
+| `common` | 25 | General process/thread/memory operations |
+| `injection` | 20 | Process/shellcode injection via APC, threads, sections |
+| `evasion` | 15 | AV/EDR evasion queries and operations |
+| `token` | 6 | Token manipulation |
+| `stealth` | 31 | Maximum evasion: injection + evasion + unhooking |
+| `file_ops` | 7 | File I/O via NT syscalls |
+| `transaction` | 7 | Process doppelganging / transaction rollback |
+| `all` | 62 | All supported functions |
+
+**Examples:**
+
+```bash
+# Single preset
+python syswhispers.py --preset common
+
+# Multiple presets (functions are merged)
+python syswhispers.py --preset injection,evasion
+
+# Short form
+python syswhispers.py -p stealth
+```
+
+### `--functions` / `-f`
+
+Specify individual NT function names.
+
+**Syntax:** `--functions FUNC[,FUNC,...]`
+
+**Type:** String (comma-separated list)
+
+**Examples:**
+
+```bash
+# Single function
+python syswhispers.py --functions NtAllocateVirtualMemory
+
+# Multiple functions
+python syswhispers.py --functions NtAllocateVirtualMemory,NtCreateThreadEx,NtWriteVirtualMemory
+
+# Short form
+python syswhispers.py -f NtAllocateVirtualMemory,NtProtectVirtualMemory
+```
+
+<Tip>
+You can combine `--preset` and `--functions` to add extra functions to a preset:
+
+```bash
+python syswhispers.py --preset common --functions NtQueryObject
+```
+</Tip>
+
+## Target Configuration
+
+### `--arch` / `-a`
+
+Target processor architecture.
+
+**Syntax:** `--arch ARCH`
+
+**Type:** Choice
+
+**Default:** `x64`
+
+**Choices:**
+- `x64` - 64-bit Windows (most common)
+- `x86` - 32-bit Windows
+- `wow64` - 32-bit process on 64-bit Windows
+- `arm64` - ARM64 Windows
+
+**Examples:**
+
+```bash
+# 64-bit (default)
+python syswhispers.py --preset common --arch x64
+
+# 32-bit Windows
+python syswhispers.py --preset common --arch x86
+
+# WoW64 (32-bit app on 64-bit OS)
+python syswhispers.py --preset common --arch wow64
+```
+
+### `--compiler` / `-c`
+
+Target compiler toolchain.
+
+**Syntax:** `--compiler COMPILER`
+
+**Type:** Choice
+
+**Default:** `msvc`
+
+**Choices:**
+- `msvc` - Microsoft Visual C++ with MASM assembler (generates `.asm` file)
+- `mingw` - MinGW with GAS inline assembly
+- `clang` - Clang with GAS inline assembly
+
+**Examples:**
+
+```bash
+# MSVC (default)
+python syswhispers.py --preset common --compiler msvc
+
+# MinGW/GCC
+python syswhispers.py --preset common --compiler mingw
+
+# Clang
+python syswhispers.py --preset common --compiler clang
+```
+
+<Warning>
+**MSVC** generates a separate `.asm` file that requires MASM to be enabled in your project.
+
+**MinGW/Clang** use inline assembly in C files. Compile with `-masm=intel` flag.
+</Warning>
+
+## Techniques
+
+### `--method` / `-m`
+
+Syscall invocation method. See [Invocation Methods](/cli/invocation-methods) for detailed explanations.
+
+**Syntax:** `--method METHOD`
+
+**Type:** Choice
+
+**Default:** `embedded`
+
+**Choices:**
+- `embedded` - Direct syscall (syscall instruction in your stub)
+- `indirect` - Jump to syscall;ret gadget in ntdll
+- `randomized` - Jump to random syscall;ret gadget per call
+- `egg` - Egg marker replaced at runtime (no static syscall bytes)
+
+**Examples:**
+
+```bash
+# Direct syscall (default)
+python syswhispers.py --preset common --method embedded
+
+# Indirect syscall
+python syswhispers.py --preset injection --method indirect
+
+# Randomized indirect
+python syswhispers.py --preset stealth --method randomized
+```
+
+### `--resolve` / `-r`
+
+SSN (System Service Number) resolution method. See [SSN Resolution Methods](/cli/ssn-resolution-methods) for detailed explanations.
+
+**Syntax:** `--resolve RESOLVE`
+
+**Type:** Choice
+
+**Default:** `freshycalls`
+
+**Choices:**
+- `freshycalls` - Sort ntdll exports by address (hook-resistant, default)
+- `static` - Embed SSNs from j00ru table at generation time
+- `hells_gate` - Read SSN from ntdll stub (fails if hooked)
+- `halos_gate` - Hell's Gate + neighbor scan for hooked functions
+- `tartarus` - Handles near JMP and far JMP hooks
+- `from_disk` - Load clean ntdll from KnownDlls (bypasses all hooks)
+- `recycled` - FreshyCalls + opcode validation (most resilient)
+- `hw_breakpoint` - Hardware breakpoints + VEH to extract SSN
+
+**Examples:**
+
+```bash
+# FreshyCalls (default, recommended)
+python syswhispers.py --preset common --resolve freshycalls
+
+# Static resolution
+python syswhispers.py --preset common --resolve static
+
+# RecycledGate (most resilient)
+python syswhispers.py --preset stealth --resolve recycled
+
+# Load from disk (bypasses all hooks)
+python syswhispers.py --preset injection --resolve from_disk
+```
+
+## Evasion Options
+
+See [Evasion Options](/cli/evasion-options) for detailed explanations of each technique.
+
+### `--obfuscate`
+
+Randomize stub ordering and inject junk instructions.
+
+**Type:** Boolean flag
+
+**Default:** `false`
+
+**Effect:** Makes static analysis and signature detection harder.
+
+**Example:**
+
+```bash
+python syswhispers.py --preset common --obfuscate
+```
+
+### `--encrypt-ssn`
+
+XOR-encrypt SSN values at rest (decrypted at runtime).
+
+**Type:** Boolean flag
+
+**Default:** `false`
+
+**Effect:** SSNs are encrypted in the binary and only decrypted when needed.
+
+**Example:**
+
+```bash
+python syswhispers.py --preset injection --encrypt-ssn
+```
+
+### `--stack-spoof`
+
+Include synthetic call stack frame helper.
+
+**Type:** Boolean flag
+
+**Default:** `false`
+
+**Effect:** Reduces call stack anomalies that EDRs might detect.
+
+**Example:**
+
+```bash
+python syswhispers.py --preset stealth --stack-spoof
+```
+
+### `--etw-bypass`
+
+Include user-mode ETW writer patch.
+
+**Type:** Boolean flag
+
+**Default:** `false`
+
+**Effect:** Generates `SW4PatchEtw()` function to disable ETW event logging.
+
+**Example:**
+
+```bash
+python syswhispers.py --preset stealth --etw-bypass
+```
+
+<Warning>
+ETW bypass is for authorized testing only. Use responsibly.
+</Warning>
+
+### `--amsi-bypass`
+
+Include AMSI bypass (patches AmsiScanBuffer).
+
+**Type:** Boolean flag
+
+**Default:** `false`
+
+**Effect:** Generates `SW4PatchAmsi()` function to bypass AMSI scanning.
+
+**Example:**
+
+```bash
+python syswhispers.py --preset stealth --amsi-bypass
+```
+
+### `--unhook-ntdll`
+
+Include ntdll unhooking (remaps clean .text from KnownDlls).
+
+**Type:** Boolean flag
+
+**Default:** `false`
+
+**Effect:** Generates `SW4UnhookNtdll()` function to remove userland hooks.
+
+**Example:**
+
+```bash
+python syswhispers.py --preset stealth --unhook-ntdll
+```
+
+<Note>
+Call `SW4UnhookNtdll()` **before** `SW4Initialize()` for best results.
+</Note>
+
+### `--anti-debug`
+
+Include anti-debugging checks.
+
+**Type:** Boolean flag
+
+**Default:** `false`
+
+**Effect:** Generates `SW4AntiDebugCheck()` function that detects debuggers using PEB, timing, heap flags, and debug port checks.
+
+**Example:**
+
+```bash
+python syswhispers.py --preset stealth --anti-debug
+```
+
+### `--sleep-encrypt`
+
+Include sleep encryption (Ekko-style XOR .text during sleep).
+
+**Type:** Boolean flag
+
+**Default:** `false`
+
+**Effect:** Generates `SW4SleepEncrypt(ms)` function that encrypts memory during sleep.
+
+**Example:**
+
+```bash
+python syswhispers.py --preset stealth --sleep-encrypt
+```
+
+## Output Options
+
+### `--prefix`
+
+Prefix for all generated identifiers.
+
+**Syntax:** `--prefix PREFIX`
+
+**Type:** String
+
+**Default:** `SW4`
+
+**Effect:** All function names, types, and macros use this prefix.
+
+**Examples:**
+
+```bash
+# Default (SW4_)
+python syswhispers.py --preset common
+# Generates: SW4_NtAllocateVirtualMemory, SW4Initialize, etc.
+
+# Custom prefix
+python syswhispers.py --preset common --prefix MyApp
+# Generates: MyApp_NtAllocateVirtualMemory, MyAppInitialize, etc.
+```
+
+### `--out-file` / `-o`
+
+Output filename base (without extension).
+
+**Syntax:** `--out-file OUTFILE`
+
+**Type:** String
+
+**Default:** `<PREFIX>Syscalls` (e.g., `SW4Syscalls`)
+
+**Examples:**
+
+```bash
+# Default naming
+python syswhispers.py --preset common
+# Generates: SW4Syscalls.h, SW4Syscalls.c, SW4Syscalls.asm, SW4Syscalls_Types.h
+
+# Custom basename
+python syswhispers.py --preset common --out-file MySyscalls
+# Generates: MySyscalls.h, MySyscalls.c, MySyscalls.asm, MySyscalls_Types.h
+```
+
+### `--out-dir`
+
+Output directory for generated files.
+
+**Syntax:** `--out-dir OUTDIR`
+
+**Type:** Path
+
+**Default:** `.` (current directory)
+
+**Examples:**
+
+```bash
+# Current directory (default)
+python syswhispers.py --preset common
+
+# Specific directory
+python syswhispers.py --preset common --out-dir ./src/syscalls
+
+# Absolute path
+python syswhispers.py --preset common --out-dir /home/user/project/include
+```
+
+### `--syscall-table`
+
+Path to custom syscall table JSON (for `--resolve static`).
+
+**Syntax:** `--syscall-table PATH`
+
+**Type:** Path
+
+**Default:** `data/syscalls_nt_x64.json` (bundled)
+
+**Examples:**
+
+```bash
+# Use bundled table (default)
+python syswhispers.py --preset common --resolve static
+
+# Use custom table
+python syswhispers.py --preset common --resolve static --syscall-table ./my_syscalls.json
+```
+
+<Note>
+This option only affects `--resolve static`. Run `scripts/update_syscall_table.py` to update the bundled table from j00ru's repository.
+</Note>
+
+## Utility Options
+
+### `--verbose` / `-v`
+
+Enable verbose output.
+
+**Type:** Boolean flag
+
+**Default:** `false`
+
+**Effect:** Prints detailed information during generation, including stack traces on errors.
+
+**Example:**
+
+```bash
+python syswhispers.py --preset common --verbose
+```
+
+### `--list-functions`
+
+Print all available function names and exit.
+
+**Type:** Boolean flag
+
+**Examples:**
+
+```bash
+python syswhispers.py --list-functions
+```
+
+**Sample output:**
+
+```
+Available functions (62):
+  NtAllocateVirtualMemory (5 params)
+  NtCreateThreadEx (11 params)
+  NtWriteVirtualMemory (5 params)
+  ...
+```
+
+### `--list-presets`
+
+Print all available presets and exit.
+
+**Type:** Boolean flag
+
+**Examples:**
+
+```bash
+python syswhispers.py --list-presets
+```
+
+**Sample output:**
+
+```
+Available presets:
+  common         -- Common functions for process/thread/memory operations
+                 (25 functions: NtAllocateVirtualMemory, NtFreeVirtualMemory, ...)
+  injection      -- Functions for process/shellcode injection
+                 (20 functions: NtAllocateVirtualMemory, NtCreateThreadEx, ...)
+  ...
+```
+
+## Complete Examples
+
+### Basic Usage
+
+```bash
+# Generate common functions with defaults
+python syswhispers.py --preset common
+```
+
+### Stealth Configuration
+
+```bash
+# Maximum evasion with all techniques
+python syswhispers.py --preset stealth \
+  --method randomized \
+  --resolve recycled \
+  --obfuscate \
+  --encrypt-ssn \
+  --stack-spoof \
+  --etw-bypass \
+  --amsi-bypass \
+  --unhook-ntdll \
+  --anti-debug \
+  --sleep-encrypt
+```
+
+### Custom Function Set
+
+```bash
+# Specific functions with indirect syscalls
+python syswhispers.py \
+  --functions NtAllocateVirtualMemory,NtCreateThreadEx,NtWriteVirtualMemory \
+  --method indirect \
+  --resolve from_disk \
+  --obfuscate
+```
+
+### Cross-Platform
+
+```bash
+# MinGW with indirect syscalls
+python syswhispers.py --preset injection \
+  --compiler mingw \
+  --method indirect \
+  --resolve freshycalls
+```
+
+### Custom Output
+
+```bash
+# Custom prefix and output location
+python syswhispers.py --preset common \
+  --prefix MyApp \
+  --out-file Syscalls \
+  --out-dir ./src/native
+```
+
+## Quick Reference Table
+
+| Option | Short | Type | Default | Description |
+|--------|-------|------|---------|-------------|
+| `--preset` | `-p` | String | None | Preset function set |
+| `--functions` | `-f` | String | None | Comma-separated function list |
+| `--arch` | `-a` | Choice | `x64` | Target architecture |
+| `--compiler` | `-c` | Choice | `msvc` | Compiler toolchain |
+| `--method` | `-m` | Choice | `embedded` | Invocation method |
+| `--resolve` | `-r` | Choice | `freshycalls` | SSN resolution method |
+| `--obfuscate` | | Flag | `false` | Randomize and obfuscate |
+| `--encrypt-ssn` | | Flag | `false` | XOR-encrypt SSNs |
+| `--stack-spoof` | | Flag | `false` | Spoof call stack |
+| `--etw-bypass` | | Flag | `false` | Include ETW bypass |
+| `--amsi-bypass` | | Flag | `false` | Include AMSI bypass |
+| `--unhook-ntdll` | | Flag | `false` | Include ntdll unhooking |
+| `--anti-debug` | | Flag | `false` | Include anti-debug checks |
+| `--sleep-encrypt` | | Flag | `false` | Include sleep encryption |
+| `--syscall-table` | | Path | `data/...` | Custom syscall table |
+| `--prefix` | | String | `SW4` | Identifier prefix |
+| `--out-file` | `-o` | String | `<PREFIX>Syscalls` | Output basename |
+| `--out-dir` | | Path | `.` | Output directory |
+| `--verbose` | `-v` | Flag | `false` | Verbose output |
+| `--list-functions` | | Flag | `false` | List functions and exit |
+| `--list-presets` | | Flag | `false` | List presets and exit |
+
+## See Also
+
+- [SSN Resolution Methods](/cli/ssn-resolution-methods) - Detailed explanation of each resolution method
+- [Invocation Methods](/cli/invocation-methods) - Detailed explanation of each invocation method
+- [Evasion Options](/cli/evasion-options) - In-depth guide to evasion techniques
+- [Quick Start Guide](/quickstart) - Step-by-step tutorial
+- [Configuration Guide](/guides/basic-usage) - Choosing the right options

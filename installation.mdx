@@ -1,0 +1,344 @@
+---
+title: Installation
+description: Install SysWhispers4 and configure your development environment for syscall stub generation
+---
+
+## Requirements
+
+### System Requirements
+
+- **Operating System**: Windows 7+ (for target compilation), any OS with Python for generation
+- **Python**: 3.10 or higher
+- **Git**: For cloning the repository
+
+<Note>
+SysWhispers4 uses **type annotations** throughout the codebase, requiring Python 3.10+.
+</Note>
+
+### Compiler Requirements
+
+Choose one based on your target environment:
+
+<Tabs>
+  <Tab title="MSVC (Recommended)">
+    **Microsoft Visual C++ Compiler**
+    
+    - Visual Studio 2019 or later (Community Edition is free)
+    - MASM (Microsoft Macro Assembler) — included with VS
+    - Windows SDK
+    
+    **Installation**:
+    1. Download [Visual Studio](https://visualstudio.microsoft.com/downloads/)
+    2. During installation, select "Desktop development with C++"
+    3. Ensure "MSVC build tools" and "Windows SDK" are checked
+  </Tab>
+  
+  <Tab title="MinGW">
+    **MinGW-w64 for GCC-based compilation**
+    
+    - MinGW-w64 (x86_64-w64-mingw32-gcc)
+    - Supports GAS (GNU Assembler) inline assembly
+    
+    **Installation (Linux/WSL)**:
+    ```bash
+    # Ubuntu/Debian
+    sudo apt install mingw-w64
+    
+    # Fedora/RHEL
+    sudo dnf install mingw64-gcc
+    ```
+    
+    **Installation (Windows)**:
+    - Download from [MinGW-w64](https://www.mingw-w64.org/downloads/)
+    - Or use [MSYS2](https://www.msys2.org/): `pacman -S mingw-w64-x86_64-gcc`
+  </Tab>
+  
+  <Tab title="Clang">
+    **LLVM Clang Compiler**
+    
+    - Clang 10+ with Windows target support
+    - Supports GAS inline assembly
+    
+    **Installation**:
+    ```bash
+    # Download from LLVM releases
+    # https://releases.llvm.org/
+    
+    # Or via package manager (Linux)
+    sudo apt install clang
+    ```
+  </Tab>
+</Tabs>
+
+## Installation Steps
+
+<Steps>
+  <Step title="Clone the Repository">
+    ```bash
+    git clone https://github.com/CyberSecurityUP/SysWhispers4
+    cd SysWhispers4
+    ```
+    
+    The repository includes:
+    - `syswhispers.py` — Main CLI tool
+    - `core/` — Generation engine
+    - `data/` — Syscall tables and function prototypes
+    - `scripts/` — Utility scripts
+    - `examples/` — Sample integration code
+  </Step>
+  
+  <Step title="Verify Python Version">
+    ```bash
+    python --version
+    # or
+    python3 --version
+    ```
+    
+    Should output `Python 3.10.x` or higher.
+    
+    <Warning>
+    If you have Python < 3.10, you'll see import errors related to type annotations. Upgrade to Python 3.10+.
+    </Warning>
+  </Step>
+  
+  <Step title="(Optional) Update Syscall Tables">
+    The repository includes pre-populated syscall tables from j00ru's database. To fetch the latest:
+    
+    ```bash
+    python scripts/update_syscall_table.py
+    ```
+    
+    This updates:
+    - `data/syscalls_nt_x64.json` — x64 syscall numbers
+    - `data/syscalls_nt_x86.json` — x86 syscall numbers
+    
+    Covers:
+    - Windows 7 SP1 through Windows 11 24H2
+    - Windows Server 2022/2025
+    
+    <Note>
+    This step is only required if you plan to use `--resolve static` (static embedded SSN table). Dynamic methods like FreshyCalls don't need updated tables.
+    </Note>
+  </Step>
+  
+  <Step title="Verify Installation">
+    Test that SysWhispers4 runs correctly:
+    
+    ```bash
+    python syswhispers.py --list-functions
+    ```
+    
+    You should see a list of 64 supported NT functions:
+    
+    ```
+    Available functions (64):
+      NtAdjustPrivilegesToken (4 params)
+      NtAlertResumeThread (2 params)
+      NtAlertThread (1 params)
+      NtAllocateVirtualMemory (6 params)
+      NtAllocateVirtualMemoryEx (7 params)
+      ...
+    ```
+  </Step>
+</Steps>
+
+## Project Structure
+
+```
+SysWhispers4/
+├── syswhispers.py              # CLI entry point
+├── core/
+│   ├── models.py               # Enums, dataclasses (8 resolution, 4 invocation methods)
+│   ├── generator.py            # Code generation engine (~1900 lines)
+│   ├── obfuscator.py           # Obfuscation: junk, eggs, XOR, string encryption
+│   └── utils.py                # Hashes (DJB2, CRC32, FNV-1a), data loading
+├── data/
+│   ├── prototypes.json         # 64 NT function signatures
+│   ├── presets.json            # 8 function presets
+│   ├── syscalls_nt_x64.json   # x64 SSN table (Win7–Win11 24H2)
+│   └── syscalls_nt_x86.json   # x86 SSN table
+├── scripts/
+│   └── update_syscall_table.py # Auto-fetch latest j00ru table
+└── examples/
+    └── example_injection.c     # Reference integration example
+```
+
+## Dependencies
+
+SysWhispers4 has **zero runtime dependencies** beyond Python standard library:
+- `argparse` — CLI parsing
+- `json` — Data file parsing
+- `dataclasses` — Type-safe configuration
+- `pathlib` — Cross-platform path handling
+- `enum` — Type enumerations
+
+<Note>
+No `pip install` required! SysWhispers4 uses only Python standard library.
+</Note>
+
+## Architecture Support
+
+| Architecture | Syscall Instruction | SSN Register | Supported Methods |
+|--------------|---------------------|--------------|-------------------|
+| **x64** | `syscall` | `eax` | All (embedded, indirect, randomized, egg) |
+| **x86** | `sysenter` | `eax` | Embedded + Egg |
+| **WoW64** | `syscall` (64-bit) | `eax` | All (x64 stubs from 32-bit PE) |
+| **ARM64** | `svc #0` | `w8` | Embedded |
+
+<Tabs>
+  <Tab title="x64 (Default)">
+    Standard 64-bit Windows compilation:
+    
+    ```bash
+    python syswhispers.py --preset common --arch x64
+    ```
+    
+    - Uses `syscall` instruction
+    - SSN loaded into `eax`
+    - Parameters follow x64 calling convention: `rcx`, `rdx`, `r8`, `r9`, [stack]
+  </Tab>
+  
+  <Tab title="x86 (32-bit)">
+    32-bit Windows compilation:
+    
+    ```bash
+    python syswhispers.py --preset common --arch x86
+    ```
+    
+    - Uses `sysenter` instruction (or `int 2Eh` on older systems)
+    - SSN loaded into `eax`
+    - Parameters on stack
+  </Tab>
+  
+  <Tab title="WoW64">
+    32-bit application on 64-bit Windows (Heaven's Gate):
+    
+    ```bash
+    python syswhispers.py --preset common --arch wow64
+    ```
+    
+    - Transitions from 32-bit to 64-bit mode
+    - Uses 64-bit `syscall` instruction
+    - Complex parameter marshaling
+  </Tab>
+  
+  <Tab title="ARM64">
+    Windows on ARM (Surface Pro X, ARM64 servers):
+    
+    ```bash
+    python syswhispers.py --preset common --arch arm64
+    ```
+    
+    - Uses `svc #0` instruction
+    - SSN loaded into `w8` register
+    - Follows ARM64 calling convention
+  </Tab>
+</Tabs>
+
+## Compiler Configuration
+
+### MSVC (Visual Studio)
+
+<Steps>
+  <Step title="Create New Project">
+    - Open Visual Studio
+    - File → New → Project
+    - Select "Empty Project" (C++)
+  </Step>
+  
+  <Step title="Enable MASM">
+    - Right-click project → Build Dependencies → Build Customizations
+    - Check **masm (.targets, .props)**
+    - Click OK
+  </Step>
+  
+  <Step title="Add Generated Files">
+    After running SysWhispers4, add all generated files:
+    - `SW4Syscalls_Types.h`
+    - `SW4Syscalls.h`
+    - `SW4Syscalls.c`
+    - `SW4Syscalls.asm`
+    
+    Right-click project → Add → Existing Item → Select files
+  </Step>
+  
+  <Step title="Verify ASM File Properties">
+    Right-click `SW4Syscalls.asm` → Properties:
+    - **Item Type**: Microsoft Macro Assembler
+    - If not set, change from "C/C++ Compiler" to "Microsoft Macro Assembler"
+  </Step>
+</Steps>
+
+### MinGW / Clang
+
+<Steps>
+  <Step title="Generate with Correct Compiler Flag">
+    ```bash
+    python syswhispers.py --preset common --compiler mingw
+    # or
+    python syswhispers.py --preset common --compiler clang
+    ```
+    
+    This generates GAS inline assembly instead of MASM syntax.
+  </Step>
+  
+  <Step title="Compile Your Project">
+    ```bash
+    x86_64-w64-mingw32-gcc -masm=intel \
+        your_code.c SW4Syscalls.c SW4Syscalls_stubs.c \
+        -o output.exe -lntdll
+    ```
+    
+    <Note>
+    The `-masm=intel` flag is required for inline assembly syntax.
+    </Note>
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Python version too old">
+    **Error**: `SyntaxError: invalid syntax` or `TypeError: unsupported operand type(s)`
+    
+    **Solution**: Upgrade to Python 3.10+
+    ```bash
+    # Ubuntu/Debian
+    sudo apt install python3.10
+    
+    # Windows: Download from python.org
+    # macOS: brew install python@3.10
+    ```
+  </Accordion>
+  
+  <Accordion title="MASM not found in Visual Studio">
+    **Error**: `error MSB3721: The command "ml64.exe" exited with code 1`
+    
+    **Solution**:
+    1. Ensure MASM build customizations are enabled (see MSVC steps above)
+    2. Verify Visual Studio installation includes "MSVC build tools"
+    3. Rebuild project (Clean → Build)
+  </Accordion>
+  
+  <Accordion title="MinGW compilation errors">
+    **Error**: `undefined reference to '_imp__NtAllocateVirtualMemory'`
+    
+    **Solution**: Add `-lntdll` to link against ntdll.lib
+    ```bash
+    x86_64-w64-mingw32-gcc ... -lntdll
+    ```
+  </Accordion>
+  
+  <Accordion title="ASM syntax errors">
+    **Error**: Assembly syntax errors during compilation
+    
+    **Solution**: Verify compiler flag matches generator flag
+    - MSVC → use `--compiler msvc` (default)
+    - MinGW/GCC → use `--compiler mingw`
+    - Clang → use `--compiler clang`
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+Now that SysWhispers4 is installed, proceed to the [Quick Start](/quickstart) guide to generate your first syscall stubs and integrate them into a working project.

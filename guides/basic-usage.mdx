@@ -1,0 +1,390 @@
+---
+title: 'Basic Usage'
+description: 'Basic usage patterns and common workflows for SysWhispers4'
+icon: 'play'
+---
+
+## Overview
+
+SysWhispers4 generates C/ASM syscall stubs that invoke Windows NT kernel functions directly, bypassing user-mode hooks placed by AV/EDR products. This guide covers basic usage patterns and common workflows.
+
+## Quick Start
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/CyberSecurityUP/SysWhispers4
+    cd SysWhispers4
+    ```
+  </Step>
+
+  <Step title="Generate syscall stubs">
+    Start with the `common` preset for general process/thread/memory operations:
+    
+    ```bash
+    python syswhispers.py --preset common
+    ```
+    
+    **Generated files:**
+    - `SW4Syscalls_Types.h` — NT type definitions (structures, enums, typedefs)
+    - `SW4Syscalls.h` — Function prototypes and initialization declarations
+    - `SW4Syscalls.c` — Runtime SSN resolution and helper functions
+    - `SW4Syscalls.asm` — MASM syscall stubs (for MSVC)
+  </Step>
+
+  <Step title="Add to your project">
+    Copy all generated files to your project directory and include the header:
+    
+    ```c
+    #include "SW4Syscalls.h"
+    ```
+  </Step>
+
+  <Step title="Initialize at runtime">
+    Call the initialization function at program startup:
+    
+    ```c
+    int main(void) {
+        // Resolve syscall numbers (required for dynamic methods)
+        if (!SW4_Initialize()) {
+            fprintf(stderr, "[!] Failed to initialize SysWhispers\n");
+            return 1;
+        }
+        
+        // Ready to use NT functions via syscalls
+        // ...
+        return 0;
+    }
+    ```
+  </Step>
+
+  <Step title="Use NT functions">
+    Call NT functions directly — all invocations bypass user-mode hooks:
+    
+    ```c
+    // Allocate memory in current process
+    PVOID base = NULL;
+    SIZE_T size = 0x1000;
+    NTSTATUS status = SW4_NtAllocateVirtualMemory(
+        GetCurrentProcess(),
+        &base,
+        0,
+        &size,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_READWRITE
+    );
+    
+    if (NT_SUCCESS(status)) {
+        printf("[+] Allocated memory at 0x%p\n", base);
+    }
+    ```
+  </Step>
+</Steps>
+
+## Terminal Output Example
+
+```bash
+$ python syswhispers.py --preset common
+
+   _____           _       ___    ___     _                        _____ 
+  /  ___|         | |     / / |  / / |   (_)                      /  ___|
+  \ `--. _   _ ___| |    / /| | / /| |__  _ ___ _ __   ___ _ __  \ `--. 
+   `--. \ | | / __| |   / / | |/ / | '_ \| / __| '_ \ / _ \ '__|  `--. \
+  /\__/ / |_| \__ \ |  / /  |    /  | | | | \__ \ |_) |  __/ |    /\__/ /
+  \____/ \__, |___/_| /_/   |_|\_\  |_| |_|_|___/ .__/ \___|_|    \____/ 
+          __/ |                                 | |                       
+         |___/                                  |_|                       
+
+  Version : 4.1.0
+  Author  : CyberSecurityUP / community
+
+  Functions  : 25
+  Arch       : x64
+  Compiler   : msvc
+  Resolution : freshycalls
+  Method     : embedded
+  Prefix     : SW4_
+
+  [+] Generating code...
+  [+] Writing SW4Syscalls_Types.h (218 lines)
+  [+] Writing SW4Syscalls.h (52 lines)
+  [+] Writing SW4Syscalls.c (387 lines)
+  [+] Writing SW4Syscalls.asm (892 lines)
+
+  [*] Integration guide:
+      Add to MSVC project:
+        SW4Syscalls_Types.h  SW4Syscalls.h  SW4Syscalls.c  SW4Syscalls.asm
+      Enable MASM: Project -> Build Customizations -> masm (.targets)
+      Call SW4_Initialize() at startup.
+
+  [+] Done.
+```
+
+## Common Workflows
+
+### Memory Operations
+
+```c
+#include "SW4Syscalls.h"
+
+int allocate_and_protect(void) {
+    SW4_Initialize();
+    
+    // 1. Allocate RW memory
+    PVOID base = NULL;
+    SIZE_T size = 0x1000;
+    NTSTATUS st = SW4_NtAllocateVirtualMemory(
+        GetCurrentProcess(), &base, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+    );
+    
+    if (!NT_SUCCESS(st)) return 1;
+    
+    // 2. Write data
+    const char data[] = "Hello from syscall";
+    SIZE_T written = 0;
+    st = SW4_NtWriteVirtualMemory(
+        GetCurrentProcess(), base, (PVOID)data,
+        sizeof(data), &written
+    );
+    
+    // 3. Change protection to RX
+    ULONG oldProtect = 0;
+    st = SW4_NtProtectVirtualMemory(
+        GetCurrentProcess(), &base, &size,
+        PAGE_EXECUTE_READ, &oldProtect
+    );
+    
+    // 4. Query memory info
+    MEMORY_BASIC_INFORMATION mbi;
+    SIZE_T retLen = 0;
+    st = SW4_NtQueryVirtualMemory(
+        GetCurrentProcess(), base,
+        MemoryBasicInformation, &mbi,
+        sizeof(mbi), &retLen
+    );
+    
+    printf("[+] Region base: 0x%p, size: 0x%llx, protect: 0x%x\n",
+           mbi.BaseAddress, (ULONG64)mbi.RegionSize, mbi.Protect);
+    
+    // 5. Free memory
+    size = 0;
+    SW4_NtFreeVirtualMemory(GetCurrentProcess(), &base, &size, MEM_RELEASE);
+    
+    return 0;
+}
+```
+
+### Thread Operations
+
+```c
+#include "SW4Syscalls.h"
+
+DWORD WINAPI ThreadRoutine(LPVOID param) {
+    printf("[+] Thread running via NT syscall\n");
+    return 0;
+}
+
+int create_and_manage_thread(void) {
+    SW4_Initialize();
+    
+    // 1. Create thread
+    HANDLE hThread = NULL;
+    NTSTATUS st = SW4_NtCreateThreadEx(
+        &hThread,
+        THREAD_ALL_ACCESS,
+        NULL,
+        GetCurrentProcess(),
+        ThreadRoutine,
+        NULL,  // parameter
+        0,     // flags (0 = run immediately)
+        0, 0, 0, NULL
+    );
+    
+    if (!NT_SUCCESS(st)) return 1;
+    printf("[+] Thread created: 0x%p\n", hThread);
+    
+    // 2. Wait for thread
+    SW4_NtWaitForSingleObject(hThread, FALSE, NULL);
+    
+    // 3. Close handle
+    SW4_NtClose(hThread);
+    
+    return 0;
+}
+```
+
+### Process Querying
+
+```c
+#include "SW4Syscalls.h"
+
+int query_process_info(DWORD pid) {
+    SW4_Initialize();
+    
+    // Open process
+    HANDLE hProcess = NULL;
+    OBJECT_ATTRIBUTES objAttr = { sizeof(OBJECT_ATTRIBUTES) };
+    CLIENT_ID cid = { (PVOID)(ULONG_PTR)pid, NULL };
+    
+    NTSTATUS st = SW4_NtOpenProcess(
+        &hProcess, PROCESS_QUERY_INFORMATION,
+        &objAttr, &cid
+    );
+    
+    if (!NT_SUCCESS(st)) return 1;
+    
+    // Query basic information
+    PROCESS_BASIC_INFORMATION pbi;
+    ULONG retLen = 0;
+    st = SW4_NtQueryInformationProcess(
+        hProcess, ProcessBasicInformation,
+        &pbi, sizeof(pbi), &retLen
+    );
+    
+    if (NT_SUCCESS(st)) {
+        printf("[+] PID: %lu, PPID: %lu, Exit: 0x%x\n",
+               (ULONG)(ULONG_PTR)pbi.UniqueProcessId,
+               (ULONG)(ULONG_PTR)pbi.InheritedFromUniqueProcessId,
+               pbi.ExitStatus);
+    }
+    
+    SW4_NtClose(hProcess);
+    return 0;
+}
+```
+
+## Choosing Functions
+
+### Using Presets
+
+Presets group commonly-used functions for specific tasks:
+
+```bash
+# General operations (25 functions)
+python syswhispers.py --preset common
+
+# Process injection (20 functions)
+python syswhispers.py --preset injection
+
+# AV/EDR evasion (15 functions)
+python syswhispers.py --preset evasion
+
+# Token manipulation (6 functions)
+python syswhispers.py --preset token
+```
+
+See [Presets](/guides/presets) for complete preset documentation.
+
+### Selecting Specific Functions
+
+Choose only the functions you need:
+
+```bash
+python syswhispers.py \
+    --functions NtAllocateVirtualMemory,NtWriteVirtualMemory,NtCreateThreadEx
+```
+
+### Combining Presets and Functions
+
+Merge a preset with additional functions:
+
+```bash
+python syswhispers.py \
+    --preset common \
+    --functions NtQueueApcThread,NtTestAlert
+```
+
+## List Available Functions
+
+```bash
+python syswhispers.py --list-functions
+```
+
+**Output:**
+```
+Available functions (64):
+  NtAdjustPrivilegesToken (4 params)
+  NtAlertResumeThread (2 params)
+  NtAlertThread (1 params)
+  NtAllocateVirtualMemory (6 params)
+  NtAllocateVirtualMemoryEx (7 params)
+  ...
+```
+
+## Customizing Output
+
+### Change Symbol Prefix
+
+```bash
+python syswhispers.py --preset common --prefix MySyscalls
+```
+
+Generates: `MySyscalls_Initialize()`, `MySyscalls_NtAllocateVirtualMemory()`, etc.
+
+### Change Output Directory
+
+```bash
+python syswhispers.py --preset common --out-dir ./syscalls
+```
+
+### Change Output Filename
+
+```bash
+python syswhispers.py --preset common --out-file MyCalls
+```
+
+Generates: `MyCalls_Types.h`, `MyCalls.h`, `MyCalls.c`, `MyCalls.asm`
+
+## Understanding NT Status Codes
+
+All NT functions return `NTSTATUS` values. Use the `NT_SUCCESS()` macro:
+
+```c
+NTSTATUS status = SW4_NtAllocateVirtualMemory(...);
+
+if (NT_SUCCESS(status)) {
+    // Success (0x00000000 - 0x7FFFFFFF)
+    printf("[+] Success: 0x%08X\n", status);
+} else {
+    // Error or warning (0x80000000 - 0xFFFFFFFF)
+    fprintf(stderr, "[!] Failed: 0x%08X\n", status);
+}
+```
+
+**Common status codes:**
+- `STATUS_SUCCESS` (`0x00000000`) — Operation succeeded
+- `STATUS_ACCESS_DENIED` (`0xC0000022`) — Insufficient privileges
+- `STATUS_INVALID_PARAMETER` (`0xC000000D`) — Bad parameter
+- `STATUS_INSUFFICIENT_RESOURCES` (`0xC000009A`) — Out of memory
+
+## Default Configuration
+
+When you run `python syswhispers.py --preset common`, you get:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Architecture | `x64` | 64-bit Windows |
+| Compiler | `msvc` | MASM assembly syntax |
+| Resolution | `freshycalls` | Sort ntdll exports by VA |
+| Method | `embedded` | Direct syscall in your PE |
+| Prefix | `SW4` | Symbol prefix |
+
+See [Advanced Evasion](/guides/advanced-evasion) to customize these settings.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Advanced Evasion" icon="mask" href="/guides/advanced-evasion">
+    Learn about SSN resolution methods, invocation techniques, and evasion features
+  </Card>
+  <Card title="MSVC Integration" icon="microsoft" href="/guides/integration-msvc">
+    Complete Visual Studio project setup guide
+  </Card>
+  <Card title="MinGW Integration" icon="code" href="/guides/integration-mingw">
+    Integration with MinGW and Clang compilers
+  </Card>
+  <Card title="Presets Reference" icon="list" href="/guides/presets">
+    Detailed documentation of all function presets
+  </Card>
+</CardGroup>

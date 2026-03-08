@@ -1,0 +1,288 @@
+---
+title: EDR Detection Vectors
+description: Understanding how different syscall methods fare against EDR detection techniques
+---
+
+## Overview
+
+EDR products employ multiple detection layers to identify direct syscall usage. Understanding these vectors helps you choose the right combination of resolution and invocation methods for your engagement.
+
+## Detection Vector Comparison
+
+| Detection Vector | Embedded | Indirect | Randomized | Egg |
+|---|:-:|:-:|:-:|:-:|
+| User-mode hook bypass | ✅ | ✅ | ✅ | ✅ |
+| RIP inside ntdll at syscall | ❌ | ✅ | ✅ | ❌ |
+| No `0F 05` in binary on disk | ✅¹ | ✅ | ✅ | **✅** |
+| Random gadget per call | ❌ | ❌ | **✅** | ❌ |
+| Clean call stack | ²  | ² | ² | ² |
+| Memory scan evasion during sleep | ³ | ³ | ³ | ³ |
+| Kernel ETW-Ti bypass | ❌ | ❌ | ❌ | ❌ |
+
+**Notes:**
+- ¹ The `syscall` opcode exists in your PE's `.text` section at your code address, not ntdll
+- ² Requires `--stack-spoof` flag
+- ³ Requires `--sleep-encrypt` flag
+
+## Detection Layers Explained
+
+### User-Mode Hooks
+
+**What it is:** EDR products place inline hooks (JMP instructions) at the start of `ntdll.dll` functions to intercept API calls.
+
+**Bypass:** All SysWhispers4 methods bypass these hooks because they invoke syscalls directly, never calling the hooked functions.
+
+**Effectiveness:** ✅ All methods
+
+### RIP Location Analysis
+
+**What it is:** When a syscall instruction executes, the kernel can inspect the return address (RIP). Legitimate Windows API calls have RIP pointing into `ntdll.dll`, while direct syscalls from user code point into the calling PE.
+
+**Detection signature:**
+```c
+if (syscall_origin_rip NOT in ntdll.dll range) {
+    // Potential direct syscall detected
+    flag_or_block();
+}
+```
+
+**Bypass methods:**
+- **Indirect** (`--method indirect`): Jumps to a `syscall;ret` gadget inside ntdll
+- **Randomized** (`--method randomized`): Same as indirect, but selects a random gadget from a pool of up to 64
+
+**Effectiveness:**
+- ❌ Embedded: RIP in your PE
+- ✅ Indirect/Randomized: RIP in ntdll
+- ❌ Egg hunt: RIP in your PE
+
+### Static Binary Analysis
+
+**What it is:** Scanning the on-disk PE file for `syscall` opcodes (`0F 05`) outside of system DLLs.
+
+**Detection heuristic:**
+```
+if (user_pe contains "0F 05" sequence) {
+    score += SYSCALL_OPCODE_PRESENT;
+}
+```
+
+**Bypass methods:**
+- **Egg hunt** (`--method egg`): Replaces `syscall` with a random 8-byte egg marker at compile time, then patches it at runtime
+
+**Effectiveness:**
+- ⚠️ Embedded/Indirect/Randomized: `syscall` visible on disk
+- ✅ Egg hunt: No `syscall` opcode in binary
+
+### Gadget Whitelisting
+
+**What it is:** Advanced EDRs catalog legitimate syscall gadgets in ntdll and flag calls from uncatalogued or suspicious gadgets.
+
+**Detection example:**
+```c
+if (syscall_gadget == 0x7FFE12345678) {
+    // Known legitimate gadget, allow
+} else {
+    // Unknown or suspicious gadget, investigate
+}
+```
+
+**Bypass methods:**
+- **Randomized indirect** (`--method randomized`): Uses RDTSC for entropy to select from up to 64 gadgets on every call
+
+**Effectiveness:**
+- ❌ Indirect: Same gadget every call (detectable pattern)
+- ✅ Randomized: Different gadget per call (defeats cataloging)
+
+### Call Stack Walking
+
+**What it is:** EDRs inspect the call stack to verify calls originated from legitimate code paths.
+
+**Suspicious pattern:**
+```
+Kernel
+└─ syscall instruction (ntdll or user PE)
+   └─ user_code.exe!main+0x123    ← No intermediate API layers!
+```
+
+**Expected pattern:**
+```
+Kernel
+└─ ntdll!NtAllocateVirtualMemory
+   └─ kernel32!VirtualAlloc
+      └─ user_code.exe!main+0x456
+```
+
+**Bypass methods:**
+- **Stack spoofing** (`--stack-spoof`): Synthetic return address pointing into ntdll
+
+**Effectiveness:**
+- ❌ Default: Suspicious flat stack
+- ✅ With `--stack-spoof`: Appears to originate from ntdll
+
+### Memory Scanning
+
+**What it is:** Periodic scans of process memory looking for known malicious patterns, IOCs, or suspicious code signatures.
+
+**Bypass methods:**
+- **Sleep encryption** (`--sleep-encrypt`): Ekko-style XOR encryption of `.text` section during sleep
+- **Obfuscation** (`--obfuscate`): Junk instruction injection, stub reordering
+- **SSN encryption** (`--encrypt-ssn`): XOR-encrypted SSN table at rest
+
+**Effectiveness:**
+- ❌ Default: Syscall stubs visible in memory
+- ✅ With evasion flags: Encrypted/obfuscated signatures
+
+### Kernel ETW-Ti
+
+**What it is:** `Microsoft-Windows-Threat-Intelligence` provider operates at kernel level, logging syscall events regardless of how they're invoked.
+
+**Events logged:**
+- Process creation
+- Thread creation  
+- Image load
+- Memory allocation with executable permissions
+- Remote thread creation
+
+**Bypass:** ❌ **Not possible from user-mode**
+
+ETW-Ti callbacks execute inside the kernel after the syscall has already transitioned. No user-mode technique (embedded, indirect, randomized, egg hunt) can prevent these events.
+
+**Mitigation strategies:**
+1. Use kernel driver to disable ETW-Ti callbacks (requires kernel access)
+2. Operate within normal behavioral bounds to avoid detection triggers
+3. Combine with other evasion techniques to reduce overall detection score
+
+<Note>
+ETW-Ti bypass requires kernel-level access (driver) or exploiting a kernel vulnerability. SysWhispers4 focuses on user-mode evasion techniques.
+</Note>
+
+## Method Selection Guide
+
+### Red Team Engagement (Maximum Evasion)
+
+**Recommended:**
+```bash
+python syswhispers.py --preset stealth \
+    --method randomized --resolve recycled \
+    --obfuscate --encrypt-ssn --stack-spoof \
+    --unhook-ntdll --etw-bypass --amsi-bypass \
+    --anti-debug --sleep-encrypt
+```
+
+**Rationale:**
+- Randomized gadgets defeat pattern analysis
+- RecycledGate bypasses all hook types
+- Stack spoofing creates legitimate-looking call chains
+- Sleep encryption evades periodic memory scans
+
+### Bypassing Heavy EDR (CrowdStrike, SentinelOne, etc.)
+
+**Recommended:**
+```bash
+python syswhispers.py --preset injection \
+    --method indirect --resolve from_disk \
+    --unhook-ntdll --encrypt-ssn
+```
+
+**Rationale:**
+- `from_disk` reads clean ntdll from `\KnownDlls` (bypasses all hooks)
+- Indirect keeps RIP in ntdll  
+- Unhooking removes inline hooks before SSN resolution
+- SSN encryption prevents static signature matching
+
+### CTF / Quick Testing
+
+**Recommended:**
+```bash
+python syswhispers.py --preset common
+```
+
+**Rationale:**
+- Default FreshyCalls works against most basic hooks
+- Fast generation and compilation
+- Minimal complexity for debugging
+
+### Static Analysis Evasion (Sandboxes, AV Scans)
+
+**Recommended:**
+```bash
+python syswhispers.py --preset injection \
+    --method egg --resolve halos_gate \
+    --obfuscate
+```
+
+**Rationale:**
+- Egg hunt removes `syscall` opcode from disk binary
+- Obfuscation disrupts signature matching
+- Halo's Gate handles simple hooks
+
+## Detection Trade-offs
+
+| Goal | Best Method | Trade-off |
+|------|-------------|----------|
+| Maximum hook resistance | `--resolve from_disk` or `recycled` | Slower initialization |
+| Cleanest RIP at syscall | `--method randomized` | Slightly more complex stubs |
+| No syscall on disk | `--method egg` | Runtime patching required |
+| Smallest binary | `--method embedded --resolve static` | More detectable |
+| Fastest execution | `--method embedded` | No RIP obfuscation |
+
+## Known Limitations
+
+<Warning>
+**Cannot bypass:**
+- Kernel ETW-Ti callbacks (requires kernel driver)
+- Kernel PatchGuard (Windows kernel integrity checks)
+- Virtualization-based security (VBS) / Hypervisor-protected code integrity (HVCI)
+- Hardware-assisted control flow integrity (Intel CET, ARM BTI)
+</Warning>
+
+**Can bypass:**
+- All user-mode inline hooks
+- IAT/EAT hooks
+- User-mode ETW event delivery (`--etw-bypass`)
+- AMSI scanning (`--amsi-bypass`)
+- Memory scanners during sleep (`--sleep-encrypt`)
+- User-mode debuggers (`--anti-debug`)
+
+## Testing Your Evasion
+
+### Verify RIP Location
+
+1. Set kernel debugger breakpoint on `nt!NtAllocateVirtualMemory`
+2. Check return address (RIP) when syscall enters kernel:
+
+```
+kd> kc
+Call Site
+nt!NtAllocateVirtualMemory
+ntdll!<syscall_gadget>+0x5     ← Should be in ntdll for indirect/randomized
+user_code!main+0x123
+```
+
+### Check Static Binary
+
+```bash
+# Search for syscall opcode (0F 05)
+xxd your_binary.exe | grep "0f 05"
+
+# Egg hunt should show NO results
+# Embedded/indirect/randomized will show hits
+```
+
+### Monitor ETW-Ti Events
+
+```powershell
+# Capture ETW-Ti events (requires admin)
+logman create trace SyscallTrace -p Microsoft-Windows-Threat-Intelligence -o syscall.etl
+logman start SyscallTrace
+# Run your binary
+logman stop SyscallTrace
+
+# All methods will generate ETW-Ti events (no user-mode bypass)
+```
+
+## Further Reading
+
+- [ETW-Ti Internals](https://medium.com/@yardenshafir2/etw-ti-is-this-the-end-for-user-mode-edr-evasion-8e9f5b5f3d4a)
+- [Call Stack Spoofing Techniques](https://labs.withsecure.com/publications/spoofing-call-stacks-to-confuse-edrs)
+- [Syscall Detection Research](https://www.elastic.co/security-labs/direct-syscall-detection-for-endpoint-security)

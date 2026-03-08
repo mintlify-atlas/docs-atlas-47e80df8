@@ -1,0 +1,511 @@
+---
+title: 'Hardware Breakpoint SSN Extraction'
+description: 'Use CPU debug registers and VEH to capture syscall numbers at runtime'
+icon: 'microchip'
+---
+
+## Overview
+
+Hardware Breakpoint SSN extraction is the most **advanced** resolution technique in SysWhispers4, using CPU debug registers (DR0-DR3) and a Vectored Exception Handler (VEH) to capture syscall numbers without reading potentially-hooked function bytes. This method extracts SSNs **at the exact moment they're loaded into EAX** — after `mov eax, <SSN>` executes but before the `syscall` instruction.
+
+<Warning>
+**Complexity**: This technique requires understanding of:
+- x86/x64 debug registers (DR0-DR7)
+- Vectored Exception Handling (VEH)
+- CONTEXT manipulation
+- Single-step exceptions
+
+Use [RecycledGate](/advanced/recycled-gate) or [FreshyCalls](/advanced/freshycalls) unless you specifically need runtime SSN capture.
+</Warning>
+
+## The Technique: Breakpoint-on-Syscall
+
+### Core Concept
+
+Instead of **reading** the `mov eax, <SSN>` opcode, we **execute** it under a hardware breakpoint and capture the result from the CPU register:
+
+```asm
+; NT stub (e.g., NtAllocateVirtualMemory):
+NtAllocateVirtualMemory:
+    4C 8B D1              mov r10, rcx          ; Save arg1
+    B8 18 00 00 00        mov eax, 0x18         ; ← We want to capture this value
+    0F 05                 syscall               ; ← Set breakpoint HERE
+    C3                    ret
+```
+
+**Strategy**:
+1. Set hardware breakpoint (DR0) at the `syscall` instruction address
+2. Call into the NT stub
+3. When execution hits the breakpoint, our VEH handler fires
+4. Read EAX from the exception context — it contains the SSN
+5. Clear the breakpoint and skip the syscall to avoid actual kernel entry
+
+## CPU Debug Registers
+
+### Register Layout (x64)
+
+| Register | Purpose | Size | Usage |
+|----------|---------|:-:|-------|
+| **DR0-DR3** | Breakpoint addresses | 64-bit | Hold linear addresses to break on |
+| **DR4-DR5** | Reserved | — | Aliased to DR6/DR7 on old CPUs |
+| **DR6** | Debug status | 64-bit | Flags indicating which breakpoint fired |
+| **DR7** | Debug control | 64-bit | Enable/disable DR0-DR3, set conditions |
+
+### DR7 Control Register
+
+```
+DR7 bit layout (simplified):
+Bit  0:     L0 — DR0 local enable (current task)
+Bit  1:     G0 — DR0 global enable (all tasks)
+Bit  2-3:   L1/G1 (DR1)
+Bit  4-5:   L2/G2 (DR2)
+Bit  6-7:   L3/G3 (DR3)
+Bit 16-17:  R/W0 — DR0 condition (00=exec, 01=write, 11=read/write)
+Bit 18-19:  LEN0 — DR0 length (00=1 byte, 01=2 bytes, 11=4/8 bytes)
+Bit 20-31:  Similar for DR1-DR3
+```
+
+### Setting an Execution Breakpoint
+
+```c
+// Set DR0 to break on execution at 'address'
+CONTEXT ctx;
+ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+GetThreadContext(GetCurrentThread(), &ctx);
+
+ctx.Dr0 = (DWORD64)address;        // Breakpoint address
+ctx.Dr6 = 0;                       // Clear status
+ctx.Dr7 = (1 << 0);                // Enable DR0 local
+ctx.Dr7 |= (0 << 16);              // R/W0 = 00 (execute)
+ctx.Dr7 |= (0 << 18);              // LEN0 = 00 (1 byte)
+
+SetThreadContext(GetCurrentThread(), &ctx);
+```
+
+## Vectored Exception Handler (VEH)
+
+### What is VEH?
+
+VEH allows user-mode applications to register handlers for hardware exceptions **before** structured exception handling (SEH) runs. Critical for catching debug register breakpoints.
+
+### Registration
+
+```c
+PVOID vehHandle = AddVectoredExceptionHandler(
+    1,  // Call this handler first
+    SW4_DebugExceptionHandler
+);
+```
+
+### Handler Structure
+
+```c
+LONG WINAPI SW4_DebugExceptionHandler(PEXCEPTION_POINTERS ExceptionInfo) {
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP) {
+        // Debug register breakpoint fired
+        PCONTEXT ctx = ExceptionInfo->ContextRecord;
+        
+        // Check which breakpoint hit
+        if (ctx->Dr6 & (1 << 0)) {  // DR0 fired
+            // DR0 was set at the syscall instruction
+            // EAX contains the SSN!
+            DWORD ssn = (DWORD)ctx->Rax;  // x64: RAX lower 32 bits
+            
+            // Store SSN in global table
+            g_CurrentSsn = ssn;
+            
+            // Skip the syscall instruction (avoid kernel entry)
+            ctx->Rip += 2;  // syscall is 2 bytes: 0F 05
+            
+            // Clear DR0 and status
+            ctx->Dr0 = 0;
+            ctx->Dr6 = 0;
+            ctx->Dr7 = 0;
+            
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+```
+
+## Full Implementation
+
+### Initialization
+
+```c
+typedef struct _SW4_HW_BP_CONTEXT {
+    PVOID   SyscallAddress;  // Address of syscall instruction
+    DWORD   FunctionHash;    // DJB2 hash of function name
+    DWORD   CapturedSsn;     // SSN captured from EAX
+    BOOL    Complete;        // Capture successful
+} SW4_HW_BP_CONTEXT;
+
+static SW4_HW_BP_CONTEXT g_BpContext;
+
+LONG WINAPI SW4_VehHandler(PEXCEPTION_POINTERS ExceptionInfo) {
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP) {
+        PCONTEXT ctx = ExceptionInfo->ContextRecord;
+        
+        if (ctx->Dr6 & (1 << 0)) {  // DR0 fired
+            // Capture SSN from RAX
+            g_BpContext.CapturedSsn = (DWORD)(ctx->Rax & 0xFFFFFFFF);
+            g_BpContext.Complete = TRUE;
+            
+            // Skip syscall (2 bytes: 0F 05)
+            ctx->Rip += 2;
+            
+            // Disable breakpoint
+            ctx->Dr0 = 0;
+            ctx->Dr6 = 0;
+            ctx->Dr7 = 0;
+            
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+BOOL SW4_HardwareBreakpoint(PVOID pNtdll) {
+    PVOID vehHandle = AddVectoredExceptionHandler(1, SW4_VehHandler);
+    if (!vehHandle) return FALSE;
+
+    // Parse ntdll exports
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)pNtdll;
+    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((PBYTE)pNtdll + dos->e_lfanew);
+    PIMAGE_EXPORT_DIRECTORY exports = 
+        (PIMAGE_EXPORT_DIRECTORY)((PBYTE)pNtdll + 
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+
+    PDWORD nameRvas = (PDWORD)((PBYTE)pNtdll + exports->AddressOfNames);
+    PDWORD funcRvas = (PDWORD)((PBYTE)pNtdll + exports->AddressOfFunctions);
+    PWORD ordinals = (PWORD)((PBYTE)pNtdll + exports->AddressOfNameOrdinals);
+
+    // For each NT function we want
+    for (DWORD i = 0; i < exports->NumberOfNames; i++) {
+        PCHAR name = (PCHAR)((PBYTE)pNtdll + nameRvas[i]);
+        if (name[0] != 'N' || name[1] != 't') continue;
+
+        DWORD hash = djb2_hash(name);
+        
+        // Check if this is one of our target functions
+        DWORD funcIdx = 0xFFFFFFFF;
+        for (DWORD j = 0; j < SW4_FUNC_COUNT; j++) {
+            if (SW4_FunctionHashes[j] == hash) {
+                funcIdx = j;
+                break;
+            }
+        }
+        if (funcIdx == 0xFFFFFFFF) continue;
+
+        // Get function address
+        PVOID funcAddr = (PBYTE)pNtdll + funcRvas[ordinals[i]];
+        PBYTE code = (PBYTE)funcAddr;
+
+        // Locate syscall instruction (scan for 0F 05)
+        PVOID syscallAddr = NULL;
+        for (int offset = 0; offset < 32; offset++) {
+            if (code[offset] == 0x0F && code[offset + 1] == 0x05) {
+                syscallAddr = &code[offset];
+                break;
+            }
+        }
+        if (!syscallAddr) continue;
+
+        // Set up breakpoint context
+        g_BpContext.SyscallAddress = syscallAddr;
+        g_BpContext.FunctionHash = hash;
+        g_BpContext.Complete = FALSE;
+
+        // Set DR0 to syscall address
+        CONTEXT ctx;
+        ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        GetThreadContext(GetCurrentThread(), &ctx);
+        ctx.Dr0 = (DWORD64)syscallAddr;
+        ctx.Dr6 = 0;
+        ctx.Dr7 = (1 << 0);  // Enable DR0 local, execute breakpoint
+        SetThreadContext(GetCurrentThread(), &ctx);
+
+        // Call the NT function with dummy arguments
+        // The VEH handler will catch it and extract SSN
+        typedef NTSTATUS(NTAPI* NT_FUNC)(...);
+        NT_FUNC pFunc = (NT_FUNC)funcAddr;
+        
+        __try {
+            pFunc(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            // Ignore — we're just triggering the breakpoint
+        }
+
+        // Check if capture succeeded
+        if (g_BpContext.Complete) {
+            SW4_SsnTable[funcIdx] = g_BpContext.CapturedSsn;
+        }
+
+        // Clear context for next function
+        memset(&g_BpContext, 0, sizeof(g_BpContext));
+    }
+
+    RemoveVectoredExceptionHandler(vehHandle);
+    return TRUE;
+}
+```
+
+## Advantages
+
+<CardGroup cols={2}>
+  <Card title="No Opcode Reading" icon="eye-slash">
+    Never inspects potentially-hooked function bytes — SSN comes from CPU register
+  </Card>
+  <Card title="Runtime Capture" icon="clock">
+    Extracts actual SSN **during execution** — guaranteed to match kernel expectations
+  </Card>
+  <Card title="Hook Proof" icon="shield">
+    Works even if hooks redirect execution — breakpoint fires after SSN is loaded
+  </Card>
+  <Card title="Educational Value" icon="graduation-cap">
+    Demonstrates advanced Windows internals (debug registers, VEH, context manipulation)
+  </Card>
+</CardGroup>
+
+## Limitations
+
+### 1. Performance Overhead
+
+**Cost**: ~20-30ms initialization (vs. ~2ms for FreshyCalls)
+
+- VEH registration/removal
+- Setting debug registers per function (~64 times)
+- Exception handling overhead
+- Context switching
+
+### 2. Anti-Debug Detection
+
+Using DR0-DR3 may trigger anti-debug checks by EDRs:
+
+```c
+// EDR may periodically check:
+CONTEXT ctx;
+ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+GetThreadContext(hThread, &ctx);
+if (ctx.Dr0 || ctx.Dr1 || ctx.Dr2 || ctx.Dr3) {
+    // Debug registers in use — possible debugger
+}
+```
+
+**Mitigation**: Clear DR7 immediately after each capture.
+
+### 3. Instrumentation Callbacks
+
+Some EDRs use `NtSetInformationProcess(ProcessInstrumentationCallback)` to detect debug register manipulation:
+
+```c
+// Kernel callback fires when DR registers change
+typedef NTSTATUS (*INSTRUMENTATION_CALLBACK)(
+    PCONTEXT Context, PVOID Reserved
+);
+```
+
+**Detection**: EDR receives notification when `SetThreadContext` modifies DR0-DR7.
+
+### 4. Complexity
+
+Highest complexity of all SSN resolution methods:
+- VEH management
+- Debug register programming
+- Exception handling
+- Edge case handling (hooked VEH APIs, thread state issues)
+
+## When to Use Hardware Breakpoints
+
+<AccordionGroup>
+  <Accordion title="Use When" icon="circle-check">
+    - **Research/PoC** demonstrating advanced techniques
+    - **Maximum paranoia** + willingness to accept performance cost
+    - **Exotic EDR** that defeats all other methods (extremely rare)
+    - **Educational purposes** — learning Windows internals
+  </Accordion>
+
+  <Accordion title="Avoid When" icon="xmark">
+    - **Performance matters** — use FreshyCalls or RecycledGate
+    - **Production operations** — complexity increases failure risk
+    - **Anti-debug present** — DR register usage is a detection vector
+    - **Simpler methods work** — don't over-engineer
+  </Accordion>
+</AccordionGroup>
+
+## Comparison with Other Methods
+
+| Feature | FreshyCalls | RecycledGate | SyscallsFromDisk | **HW Breakpoint** |
+|---------|:-:|:-:|:-:|:-:|
+| Hook resistance | Very High | Maximum | Maximum | **Maximum** |
+| Speed | Fast (~2ms) | Fast (~5ms) | Slow (~15ms) | **Slowest (~25ms)** |
+| Complexity | Low | Medium | Medium | **Very High** |
+| Anti-debug risk | ❌ | ❌ | ❌ | **⚠️ High** |
+| Opcode dependency | ❌ | Partial | ✅ | **❌** |
+| Runtime capture | ❌ | ❌ | ❌ | **✅** |
+
+## Usage in SysWhispers4
+
+### Generate with Hardware Breakpoints
+
+```bash
+# Basic usage
+python syswhispers.py --preset injection --resolve hw_breakpoint
+
+# Recommended: limit function count for performance
+python syswhispers.py \
+    --functions NtAllocateVirtualMemory,NtWriteVirtualMemory,NtCreateThreadEx \
+    --resolve hw_breakpoint \
+    --method indirect
+```
+
+### Integration Example
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    printf("[*] Initializing SSN resolution via hardware breakpoints...\n");
+
+    // Initialize — this will:
+    // 1. Register VEH handler
+    // 2. Set DR0 breakpoints on each NT function's syscall instruction
+    // 3. Trigger execution to capture SSNs from EAX
+    // 4. Clean up debug registers and VEH
+    if (!SW4_Initialize()) {
+        fprintf(stderr, "[!] Hardware breakpoint SSN extraction failed\n");
+        return 1;
+    }
+
+    printf("[+] SSNs captured via debug registers\n");
+
+    // Optional: verify no debugger attached (DR usage may trigger EDR alerts)
+    if (!SW4_AntiDebugCheck()) {
+        fprintf(stderr, "[!] Debugger detected\n");
+        return 0;
+    }
+
+    // Use syscalls normally
+    PVOID base = NULL;
+    SIZE_T size = 0x1000;
+    NTSTATUS st = SW4_NtAllocateVirtualMemory(
+        GetCurrentProcess(), &base, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+    );
+
+    printf("[+] Allocated memory at 0x%p\n", base);
+    return NT_SUCCESS(st) ? 0 : 1;
+}
+```
+
+## Detection & Evasion
+
+### Observable Behaviors
+
+| Action | EDR Visibility | Kernel Visibility |
+|--------|:-:|:-:|
+| `AddVectoredExceptionHandler` | ✅ (user32.dll hook) | ❌ |
+| `SetThreadContext` (DR writes) | ✅ (ntdll hook) | ✅ (instrumentation) |
+| Debug register usage | ⚠️ (polling) | ✅ (via callbacks) |
+| VEH handler execution | ❌ (in-process) | ❌ |
+
+### Mitigation Strategies
+
+<Steps>
+  <Step title="Clear debug registers immediately">
+    Don't leave DR0-DR3 set after capture:
+    ```c
+    ctx.Dr0 = ctx.Dr1 = ctx.Dr2 = ctx.Dr3 = 0;
+    ctx.Dr6 = ctx.Dr7 = 0;
+    SetThreadContext(GetCurrentThread(), &ctx);
+    ```
+  </Step>
+
+  <Step title="Use indirect syscall invocation">
+    Keep RIP inside ntdll:
+    ```bash
+    python syswhispers.py --resolve hw_breakpoint --method indirect
+    ```
+  </Step>
+
+  <Step title="Combine with anti-instrumentation checks">
+    Detect if `ProcessInstrumentationCallback` is set:
+    ```c
+    ULONG_PTR callback = 0;
+    NtQueryInformationProcess(
+        GetCurrentProcess(),
+        ProcessInstrumentationCallback,  // 40
+        &callback,
+        sizeof(callback),
+        NULL
+    );
+    if (callback != 0) {
+        // EDR instrumentation active
+    }
+    ```
+  </Step>
+</Steps>
+
+## Technical Deep Dive: Why It Works
+
+### Execution Flow
+
+```
+1. User code calls NtAllocateVirtualMemory(...)
+   ↓
+2. CPU jumps to ntdll stub:
+   4C 8B D1              mov r10, rcx        ; arg1 → r10
+   B8 18 00 00 00        mov eax, 0x18       ; SSN → EAX
+   0F 05 ← DR0 set here  syscall
+   ↓
+3. CPU executes mov eax, 0x18 (SSN now in EAX)
+   ↓
+4. CPU reaches 0F 05, DR0 fires → EXCEPTION_SINGLE_STEP
+   ↓
+5. Windows delivers exception to VEH handlers
+   ↓
+6. Our SW4_VehHandler runs:
+   - Reads EAX from CONTEXT (0x18)
+   - Stores SSN in table
+   - ctx.Rip += 2 (skip syscall)
+   - Clears DR0
+   - Returns EXCEPTION_CONTINUE_EXECUTION
+   ↓
+7. Execution resumes after the syscall instruction
+   ↓
+8. Stub returns to user code (no actual syscall occurred)
+```
+
+### Why Hooks Don't Matter
+
+Even if an EDR hooks the first bytes with a JMP:
+
+```asm
+; Hooked stub:
+E9 XX XX XX XX        jmp <EDR_Handler>
+...
+```
+
+The **EDR handler** must eventually execute the real syscall, which means:
+1. Loading the SSN into EAX
+2. Executing the `syscall` instruction
+
+Our hardware breakpoint catches step 2, **after** step 1 completes — we still capture the SSN.
+
+## Further Reading
+
+<CardGroup cols={2}>
+  <Card title="LayeredSyscall Research" icon="link" href="https://whiteknightlabs.com/2024/07/31/layeredsyscall-abusing-veh-to-bypass-edrs/">
+    White Knight Labs on VEH abuse
+  </Card>
+  <Card title="Intel SDM: Debug Registers" icon="book" href="https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html">
+    Official documentation (Vol. 3, Chapter 17)
+  </Card>
+  <Card title="RecycledGate" icon="recycle" href="/advanced/recycled-gate">
+    Simpler alternative with excellent hook resistance
+  </Card>
+  <Card title="FreshyCalls" icon="sort" href="/advanced/freshycalls">
+    Fast default method for most use cases
+  </Card>
+</CardGroup>

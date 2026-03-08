@@ -1,97 +1,129 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "SysWhispers4"
+description: "AV/EDR evasion via direct and indirect system calls"
 ---
 
-## Setting up
+<div style={{
+  background: 'linear-gradient(135deg, #0B0C0F 0%, #1a1a1a 100%)',
+  borderRadius: '12px',
+  padding: '48px 32px',
+  marginBottom: '32px',
+  border: '1px solid #2a2a2a'
+}}>
+  <h1 style={{
+    fontFamily: 'Orbitron, sans-serif',
+    fontSize: '48px',
+    fontWeight: 700,
+    color: '#FFFFFF',
+    marginBottom: '16px',
+    textAlign: 'center'
+  }}>
+    SysWhispers4
+  </h1>
+  <p style={{
+    fontFamily: 'Montserrat, sans-serif',
+    fontSize: '18px',
+    color: '#d4d4d4',
+    textAlign: 'center',
+    marginBottom: '24px'
+  }}>
+    Python-based syscall stub generator for Windows AV/EDR evasion via direct and indirect system calls
+  </p>
+  <p style={{
+    fontFamily: 'Montserrat, sans-serif',
+    fontSize: '14px',
+    color: '#9b9b9c',
+    textAlign: 'center'
+  }}>
+    Windows NT 3.1 through Windows 11 24H2 · x64 · x86 · WoW64 · ARM64
+  </p>
+</div>
 
-Get your documentation site up and running in minutes.
+## What is SysWhispers4?
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+SysWhispers4 is a command-line tool that generates C/ASM code for invoking Windows NT kernel functions directly through syscalls, bypassing user-mode hooks placed by AV/EDR products on `ntdll.dll`. It builds on the legacy of SysWhispers 1-3 with the most comprehensive set of SSN resolution strategies, invocation methods, and evasion capabilities to date.
 
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get up and running in minutes with basic syscall generation
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Installation" icon="download" href="/installation">
+    Install SysWhispers4 and its dependencies
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Command Reference" icon="terminal" href="/cli/command-reference">
+    Complete CLI command documentation
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Generated C API functions and integration
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Key Features
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="8 SSN Resolution Methods" icon="fingerprint">
+    Static, FreshyCalls, Hell's Gate, Halo's Gate, Tartarus' Gate, SyscallsFromDisk, RecycledGate, and HW Breakpoint
+  </Card>
+  <Card title="4 Invocation Methods" icon="code-branch">
+    Embedded (direct), Indirect, Randomized Indirect, and Egg Hunt
+  </Card>
+  <Card title="Multi-Architecture Support" icon="microchip">
+    x64, x86, WoW64, and ARM64 with full compiler support (MSVC, MinGW, Clang)
+  </Card>
+  <Card title="Advanced Evasion" icon="shield-halved">
+    XOR-encrypted SSNs, call stack spoofing, sleep encryption, ETW/AMSI bypass, and anti-debugging
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Core Concepts
 
-## Need inspiration?
+<CardGroup cols={3}>
+  <Card title="SSN Resolution" icon="search" href="/concepts/ssn-resolution">
+    Learn how syscall numbers are resolved at runtime
+  </Card>
+  <Card title="Invocation Methods" icon="arrows-turn-to-dots" href="/concepts/invocation-methods">
+    Understand different ways to execute syscalls
+  </Card>
+  <Card title="Evasion Techniques" icon="user-secret" href="/concepts/evasion-techniques">
+    Explore techniques to evade AV/EDR detection
+  </Card>
+</CardGroup>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+## Quick Example
+
+```bash
+# Generate common syscalls with FreshyCalls resolution
+python syswhispers.py --preset common
+
+# Maximum evasion configuration
+python syswhispers.py --preset stealth \
+    --method randomized --resolve recycled \
+    --obfuscate --encrypt-ssn --stack-spoof \
+    --etw-bypass --amsi-bypass --unhook-ntdll \
+    --anti-debug --sleep-encrypt
+```
+
+## Integration Example
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Initialize SSN resolution
+    if (!SW4_Initialize()) return 1;
+
+    // Use NT functions directly via syscall
+    PVOID base = NULL;
+    SIZE_T size = 0x1000;
+    NTSTATUS st = SW4_NtAllocateVirtualMemory(
+        GetCurrentProcess(), &base, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+    );
+
+    return NT_SUCCESS(st) ? 0 : 1;
+}
+```
+
+<Note>
+**For authorized security testing only.** Use SysWhispers4 only on systems you own or have explicit written authorization to test. Unauthorized use is illegal in most jurisdictions.
+</Note>

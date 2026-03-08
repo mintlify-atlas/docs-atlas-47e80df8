@@ -1,0 +1,501 @@
+---
+title: File Functions
+description: NT syscall functions for file I/O operations
+---
+
+## Overview
+
+SysWhispers4 provides NT-level file I/O functions that bypass user-mode hooks on `kernel32.dll` file functions like `CreateFile`, `ReadFile`, `WriteFile`, etc.
+
+## NtCreateFile
+
+Creates or opens a file.
+
+```c
+NTSTATUS SW4_NtCreateFile(
+    PHANDLE            FileHandle,
+    ACCESS_MASK        DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes,
+    PIO_STATUS_BLOCK   IoStatusBlock,
+    PLARGE_INTEGER     AllocationSize,
+    ULONG              FileAttributes,
+    ULONG              ShareAccess,
+    ULONG              CreateDisposition,
+    ULONG              CreateOptions,
+    PVOID              EaBuffer,
+    ULONG              EaLength
+);
+```
+
+### Parameters
+
+<ParamField path="FileHandle" type="PHANDLE" required>
+  Pointer to variable that receives the file handle.
+</ParamField>
+
+<ParamField path="DesiredAccess" type="ACCESS_MASK" required>
+  Access rights:
+  - `FILE_READ_DATA` (0x0001)
+  - `FILE_WRITE_DATA` (0x0002)
+  - `FILE_APPEND_DATA` (0x0004)
+  - `GENERIC_READ` (0x80000000)
+  - `GENERIC_WRITE` (0x40000000)
+</ParamField>
+
+<ParamField path="ObjectAttributes" type="POBJECT_ATTRIBUTES" required>
+  Pointer to `OBJECT_ATTRIBUTES` structure containing the file path:
+  ```c
+  UNICODE_STRING filePath;
+  RtlInitUnicodeString(&filePath, L"\\??\\C:\\test.txt");
+  
+  OBJECT_ATTRIBUTES oa;
+  InitializeObjectAttributes(&oa, &filePath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+  ```
+</ParamField>
+
+<ParamField path="IoStatusBlock" type="PIO_STATUS_BLOCK" required>
+  Pointer to `IO_STATUS_BLOCK` structure that receives I/O status.
+</ParamField>
+
+<ParamField path="AllocationSize" type="PLARGE_INTEGER">
+  Initial allocation size. Use `NULL` for default.
+</ParamField>
+
+<ParamField path="FileAttributes" type="ULONG" required>
+  File attributes:
+  - `FILE_ATTRIBUTE_NORMAL` (0x80)
+  - `FILE_ATTRIBUTE_HIDDEN` (0x02)
+  - `FILE_ATTRIBUTE_READONLY` (0x01)
+</ParamField>
+
+<ParamField path="ShareAccess" type="ULONG" required>
+  Sharing mode:
+  - `FILE_SHARE_READ` (0x01)
+  - `FILE_SHARE_WRITE` (0x02)
+  - `FILE_SHARE_DELETE` (0x04)
+  - `0` for exclusive access
+</ParamField>
+
+<ParamField path="CreateDisposition" type="ULONG" required>
+  Action to take:
+  - `FILE_SUPERSEDE` (0) — Replace if exists
+  - `FILE_OPEN` (1) — Open existing (fail if not exists)
+  - `FILE_CREATE` (2) — Create new (fail if exists)
+  - `FILE_OPEN_IF` (3) — Open existing or create
+  - `FILE_OVERWRITE` (4) — Overwrite existing
+  - `FILE_OVERWRITE_IF` (5) — Overwrite or create
+</ParamField>
+
+<ParamField path="CreateOptions" type="ULONG" required>
+  Options:
+  - `FILE_SYNCHRONOUS_IO_NONALERT` (0x20) — Synchronous I/O
+  - `FILE_NON_DIRECTORY_FILE` (0x40) — Must be a file
+  - `FILE_DELETE_ON_CLOSE` (0x1000) — Delete when closed
+</ParamField>
+
+<ParamField path="EaBuffer" type="PVOID">
+  Extended attributes buffer (usually `NULL`).
+</ParamField>
+
+<ParamField path="EaLength" type="ULONG">
+  Extended attributes length (usually `0`).
+</ParamField>
+
+### Example: Create and Write File
+
+```c
+#include "SW4Syscalls.h"
+#include <winternl.h>
+
+int main(void) {
+    SW4_Initialize();
+
+    // Prepare file path (must use NT path format)
+    UNICODE_STRING filePath;
+    RtlInitUnicodeString(&filePath, L"\\??\\C:\\temp\\output.txt");
+
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(&oa, &filePath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    HANDLE hFile = NULL;
+    IO_STATUS_BLOCK iosb = { 0 };
+
+    // Create file
+    NTSTATUS status = SW4_NtCreateFile(
+        &hFile,
+        FILE_GENERIC_WRITE,
+        &oa,
+        &iosb,
+        NULL,                           // No initial allocation
+        FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ,
+        FILE_OVERWRITE_IF,              // Create or overwrite
+        FILE_SYNCHRONOUS_IO_NONALERT,
+        NULL,
+        0
+    );
+
+    if (NT_SUCCESS(status)) {
+        printf("[+] File created: handle 0x%p\n", hFile);
+
+        // Write data
+        const char* data = "Hello from SysWhispers4\n";
+        status = SW4_NtWriteFile(
+            hFile,
+            NULL,   // No event
+            NULL,   // No APC
+            NULL,   // No APC context
+            &iosb,
+            (PVOID)data,
+            (ULONG)strlen(data),
+            NULL,   // No byte offset (append)
+            NULL
+        );
+
+        if (NT_SUCCESS(status)) {
+            printf("[+] Wrote %llu bytes\n", iosb.Information);
+        }
+
+        SW4_NtClose(hFile);
+    } else {
+        fprintf(stderr, "[!] NtCreateFile failed: 0x%08X\n", status);
+    }
+
+    return 0;
+}
+```
+
+---
+
+## NtOpenFile
+
+Opens an existing file (simpler than `NtCreateFile`).
+
+```c
+NTSTATUS SW4_NtOpenFile(
+    PHANDLE            FileHandle,
+    ACCESS_MASK        DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes,
+    PIO_STATUS_BLOCK   IoStatusBlock,
+    ULONG              ShareAccess,
+    ULONG              OpenOptions
+);
+```
+
+### Example
+
+```c
+UNICODE_STRING filePath;
+RtlInitUnicodeString(&filePath, L"\\??\\C:\\Windows\\System32\\notepad.exe");
+
+OBJECT_ATTRIBUTES oa;
+InitializeObjectAttributes(&oa, &filePath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+HANDLE hFile = NULL;
+IO_STATUS_BLOCK iosb = { 0 };
+
+NTSTATUS status = SW4_NtOpenFile(
+    &hFile,
+    FILE_GENERIC_READ,
+    &oa,
+    &iosb,
+    FILE_SHARE_READ,
+    FILE_SYNCHRONOUS_IO_NONALERT
+);
+
+if (NT_SUCCESS(status)) {
+    printf("[+] Opened file\n");
+    // Read file...
+    SW4_NtClose(hFile);
+}
+```
+
+---
+
+## NtReadFile
+
+Reads data from a file.
+
+```c
+NTSTATUS SW4_NtReadFile(
+    HANDLE           FileHandle,
+    HANDLE           Event,
+    PVOID            ApcRoutine,
+    PVOID            ApcContext,
+    PIO_STATUS_BLOCK IoStatusBlock,
+    PVOID            Buffer,
+    ULONG            Length,
+    PLARGE_INTEGER   ByteOffset,
+    PULONG           Key
+);
+```
+
+### Parameters
+
+<ParamField path="FileHandle" type="HANDLE" required>
+  Handle to the file (from `NtOpenFile` or `NtCreateFile`).
+</ParamField>
+
+<ParamField path="Event" type="HANDLE">
+  Optional event handle to signal on completion (use `NULL` for synchronous).
+</ParamField>
+
+<ParamField path="ApcRoutine" type="PVOID">
+  Optional APC routine (use `NULL`).
+</ParamField>
+
+<ParamField path="ApcContext" type="PVOID">
+  Optional APC context (use `NULL`).
+</ParamField>
+
+<ParamField path="IoStatusBlock" type="PIO_STATUS_BLOCK" required>
+  Receives I/O status. Check `iosb.Information` for bytes read.
+</ParamField>
+
+<ParamField path="Buffer" type="PVOID" required>
+  Buffer that receives the data.
+</ParamField>
+
+<ParamField path="Length" type="ULONG" required>
+  Number of bytes to read.
+</ParamField>
+
+<ParamField path="ByteOffset" type="PLARGE_INTEGER">
+  File offset to read from. Use `NULL` to read from current position.
+</ParamField>
+
+<ParamField path="Key" type="PULONG">
+  Optional file key (use `NULL`).
+</ParamField>
+
+### Example
+
+```c
+HANDLE hFile = ...;  // From NtOpenFile
+char buffer[1024];
+IO_STATUS_BLOCK iosb = { 0 };
+
+NTSTATUS status = SW4_NtReadFile(
+    hFile,
+    NULL,   // No event
+    NULL,   // No APC
+    NULL,
+    &iosb,
+    buffer,
+    sizeof(buffer),
+    NULL,   // Read from current position
+    NULL
+);
+
+if (NT_SUCCESS(status)) {
+    printf("[+] Read %llu bytes\n", iosb.Information);
+    buffer[iosb.Information] = '\0';
+    printf("%s\n", buffer);
+}
+```
+
+---
+
+## NtWriteFile
+
+Writes data to a file.
+
+```c
+NTSTATUS SW4_NtWriteFile(
+    HANDLE           FileHandle,
+    HANDLE           Event,
+    PVOID            ApcRoutine,
+    PVOID            ApcContext,
+    PIO_STATUS_BLOCK IoStatusBlock,
+    PVOID            Buffer,
+    ULONG            Length,
+    PLARGE_INTEGER   ByteOffset,
+    PULONG           Key
+);
+```
+
+### Example
+
+```c
+const char* data = "Syscall data\n";
+IO_STATUS_BLOCK iosb = { 0 };
+
+NTSTATUS status = SW4_NtWriteFile(
+    hFile,
+    NULL,
+    NULL,
+    NULL,
+    &iosb,
+    (PVOID)data,
+    (ULONG)strlen(data),
+    NULL,   // Append to current position
+    NULL
+);
+
+if (NT_SUCCESS(status)) {
+    printf("[+] Wrote %llu bytes\n", iosb.Information);
+}
+```
+
+---
+
+## NtDeleteFile
+
+Deletes a file.
+
+```c
+NTSTATUS SW4_NtDeleteFile(
+    POBJECT_ATTRIBUTES ObjectAttributes
+);
+```
+
+### Example
+
+```c
+UNICODE_STRING filePath;
+RtlInitUnicodeString(&filePath, L"\\??\\C:\\temp\\deleteme.txt");
+
+OBJECT_ATTRIBUTES oa;
+InitializeObjectAttributes(&oa, &filePath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+NTSTATUS status = SW4_NtDeleteFile(&oa);
+
+if (NT_SUCCESS(status)) {
+    printf("[+] File deleted\n");
+} else {
+    fprintf(stderr, "[!] NtDeleteFile failed: 0x%08X\n", status);
+}
+```
+
+---
+
+## NT Path Format
+
+<Warning>
+  NT functions require **NT path format**, not Win32 paths.
+</Warning>
+
+### Conversion Table
+
+| Win32 Path | NT Path |
+|------------|--------|
+| `C:\Windows\System32` | `\??\C:\Windows\System32` |
+| `\\?\C:\temp` | `\??\C:\temp` |
+| `\\ComputerName\Share` | `\Device\Mup\ComputerName\Share` |
+
+### Helper: Convert Win32 to NT Path
+
+```c
+void Win32ToNtPath(const wchar_t* win32Path, wchar_t* ntPath, size_t ntPathSize) {
+    if (wcsncmp(win32Path, L"\\\\?\\", 4) == 0) {
+        // Already NT-style (\\?\C:\...)
+        swprintf(ntPath, ntPathSize, L"\\??\\%s", win32Path + 4);
+    } else if (win32Path[1] == L':') {
+        // Drive letter (C:\...)
+        swprintf(ntPath, ntPathSize, L"\\??\\%s", win32Path);
+    } else {
+        // Assume relative or UNC
+        wcsncpy(ntPath, win32Path, ntPathSize);
+    }
+}
+```
+
+---
+
+## Complete Example: File Dropper
+
+Drop a file to disk via syscalls:
+
+```c
+#include <stdio.h>
+#include "SW4Syscalls.h"
+#include <winternl.h>
+
+static const unsigned char payload[] = {
+    0x4D, 0x5A, 0x90, 0x00, /* MZ header */
+    // ... PE bytes ...
+};
+
+int main(void) {
+    SW4_Initialize();
+
+    // NT path
+    UNICODE_STRING filePath;
+    RtlInitUnicodeString(&filePath, L"\\??\\C:\\temp\\dropped.exe");
+
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(&oa, &filePath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    HANDLE hFile = NULL;
+    IO_STATUS_BLOCK iosb = { 0 };
+
+    // Create file
+    NTSTATUS status = SW4_NtCreateFile(
+        &hFile,
+        FILE_GENERIC_WRITE,
+        &oa,
+        &iosb,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        0,  // Exclusive access
+        FILE_OVERWRITE_IF,
+        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+        NULL,
+        0
+    );
+
+    if (!NT_SUCCESS(status)) {
+        fprintf(stderr, "[!] NtCreateFile failed: 0x%08X\n", status);
+        return 1;
+    }
+
+    printf("[+] File created\n");
+
+    // Write payload
+    status = SW4_NtWriteFile(
+        hFile,
+        NULL, NULL, NULL,
+        &iosb,
+        (PVOID)payload,
+        sizeof(payload),
+        NULL,
+        NULL
+    );
+
+    if (NT_SUCCESS(status)) {
+        printf("[+] Wrote %llu bytes\n", iosb.Information);
+    } else {
+        fprintf(stderr, "[!] NtWriteFile failed: 0x%08X\n", status);
+    }
+
+    SW4_NtClose(hFile);
+    printf("[+] File closed\n");
+
+    return 0;
+}
+```
+
+---
+
+## Advantages Over Win32 File APIs
+
+| Feature | Win32 API | NT Syscalls |
+|---------|-----------|-------------|
+| **Hook bypass** | Hooked by AV/EDR | Direct kernel call |
+| **Path format** | `C:\...` | `\??\C:\...` |
+| **Access control** | Simplified | Full NT control |
+| **Async I/O** | Limited | Full support |
+| **Extended attributes** | Limited | Full support |
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Token Functions" icon="key" href="/api/token-functions">
+    Token manipulation and privilege escalation
+  </Card>
+  <Card title="Evasion Helpers" icon="shield" href="/api/evasion-helpers">
+    ETW bypass, AMSI bypass, unhooking
+  </Card>
+</CardGroup>

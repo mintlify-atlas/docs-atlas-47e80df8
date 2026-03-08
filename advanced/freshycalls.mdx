@@ -1,0 +1,277 @@
+---
+title: 'FreshyCalls'
+description: 'Sort-by-VA syscall number resolution that bypasses inline hooks'
+icon: 'sort'
+---
+
+## Overview
+
+FreshyCalls is a robust SSN (System Service Number) resolution technique that determines syscall numbers by sorting NT function exports by their virtual addresses. Unlike traditional methods that read potentially-hooked opcode bytes, FreshyCalls only examines export table addresses — making it highly resistant to inline hooks.
+
+<Tip>
+FreshyCalls is the **default resolution method** in SysWhispers4 due to its excellent balance of speed, reliability, and hook resistance.
+</Tip>
+
+## The Problem: Inline Hooks
+
+AV/EDR products commonly place inline hooks on NT functions in `ntdll.dll` by modifying the first few bytes:
+
+```asm
+; Original NtAllocateVirtualMemory stub:
+4C 8B D1              mov r10, rcx
+B8 18 00 00 00        mov eax, 0x18      ; SSN = 0x18
+0F 05                 syscall
+C3                    ret
+
+; After EDR hook:
+E9 XX XX XX XX        jmp <EDR_Handler>  ; Overwrites first 5 bytes!
+XX XX XX XX           (garbage)
+0F 05                 syscall            ; Never reached
+C3                    ret
+```
+
+Techniques like **Hell's Gate** that read the `mov eax, <SSN>` opcode fail when hooks overwrite these bytes.
+
+## How FreshyCalls Works
+
+### Core Principle
+
+NT syscall stubs in `ntdll.dll` are laid out **sequentially** in memory, ordered by their syscall numbers. The virtual address order directly corresponds to SSN order:
+
+```
+VA: 0x180001000  →  Nt* function with SSN 0
+VA: 0x180001020  →  Nt* function with SSN 1
+VA: 0x180001040  →  Nt* function with SSN 2
+...
+VA: 0x180001600  →  Nt* function with SSN 48 (e.g., NtAllocateVirtualMemory)
+```
+
+By sorting all `Nt*` exports by VA and using the **sorted index** as the SSN, we never need to read potentially-hooked function bytes.
+
+### Algorithm
+
+```c
+// 1. Parse ntdll export table → collect all Nt* functions
+for each export in ntdll.exports:
+    if name starts with "Nt":
+        exports.add({ name, VA })
+
+// 2. Sort by virtual address (ascending)
+exports.sort_by(VA)
+
+// 3. Index in sorted list = SSN
+for (i = 0; i < exports.length; i++):
+    ssnTable[exports[i].name] = i
+```
+
+### Why It Works
+
+1. **VA order is canonical**: Microsoft's NT kernel assigns SSNs sequentially during build. `ntdll.dll` stubs are laid out in memory matching this order.
+2. **Export table is rarely hooked**: EDR hooks target function *code*, not the export directory entries. VAs remain accurate.
+3. **No opcode reading**: Unlike Hell's/Halo's Gate, we never inspect potentially-tampered bytes inside the function.
+
+## Implementation Details
+
+### Parsing the Export Table
+
+```c
+BOOL SW4_FreshyCalls(PVOID pNtdll) {
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)pNtdll;
+    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((PBYTE)pNtdll + dos->e_lfanew);
+    PIMAGE_EXPORT_DIRECTORY exports = 
+        (PIMAGE_EXPORT_DIRECTORY)((PBYTE)pNtdll + 
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+
+    PDWORD nameRvas = (PDWORD)((PBYTE)pNtdll + exports->AddressOfNames);
+    PDWORD funcRvas = (PDWORD)((PBYTE)pNtdll + exports->AddressOfFunctions);
+    PWORD  ordinals = (PWORD)((PBYTE)pNtdll + exports->AddressOfNameOrdinals);
+
+    SW4_EXPORT* ntExports = (SW4_EXPORT*)calloc(exports->NumberOfNames, sizeof(SW4_EXPORT));
+    DWORD ntCount = 0;
+
+    // Collect all Nt* exports
+    for (DWORD i = 0; i < exports->NumberOfNames; i++) {
+        PCHAR name = (PCHAR)((PBYTE)pNtdll + nameRvas[i]);
+        if (name[0] == 'N' && name[1] == 't') {
+            DWORD funcRva = funcRvas[ordinals[i]];
+            ntExports[ntCount].Address = (PVOID)((PBYTE)pNtdll + funcRva);
+            ntExports[ntCount].Hash = djb2_hash(name);
+            ntCount++;
+        }
+    }
+
+    // Sort by address
+    qsort(ntExports, ntCount, sizeof(SW4_EXPORT), compare_va);
+
+    // Index = SSN
+    for (DWORD i = 0; i < ntCount; i++) {
+        // Match against our function table by hash
+        for (DWORD j = 0; j < SW4_FUNC_COUNT; j++) {
+            if (ntExports[i].Hash == SW4_FunctionHashes[j]) {
+                SW4_SsnTable[j] = i;  // SSN = sorted index
+                break;
+            }
+        }
+    }
+
+    free(ntExports);
+    return TRUE;
+}
+```
+
+## Strengths
+
+<CardGroup cols={2}>
+  <Card title="Hook Resistant" icon="shield-halved">
+    Works even when **every** Nt* stub is hooked — never reads function bytes, only VAs from export table
+  </Card>
+  <Card title="Fast" icon="gauge-high">
+    Single ntdll parse + qsort — completes in ~1-2ms on modern systems
+  </Card>
+  <Card title="Simple" icon="puzzle-piece">
+    No complex neighbor scanning or opcode validation logic
+  </Card>
+  <Card title="Reliable" icon="check-double">
+    Handles all common EDR hook patterns (E9 JMP, FF 25 JMP, EB short JMP, CC int3)
+  </Card>
+</CardGroup>
+
+## Limitations
+
+### Export Table Manipulation
+
+If an EDR **modifies the export directory** itself (extremely rare, as it breaks Windows API resolution), FreshyCalls can be defeated:
+
+```c
+// Hypothetical: EDR reorders export RVAs to break VA sorting
+// In practice, this would break legitimate API calls and is not observed
+exports->AddressOfFunctions[hooked_index] = trampoline_rva;
+```
+
+**Mitigation**: Use [RecycledGate](/advanced/recycled-gate), which combines FreshyCalls with opcode validation for cross-checking.
+
+### Syscall Number Changes
+
+SSNs change between Windows builds (e.g., `NtAllocateVirtualMemory` is SSN 0x18 on Win10 21H2, but 0x1A on Win11 24H2). FreshyCalls automatically adapts because it derives SSNs from the *running system's* ntdll layout.
+
+## Comparison with Other Methods
+
+| Method | Hook Resistance | Speed | Complexity | Export Table Dependency |
+|--------|:-:|:-:|:-:|:-:|
+| Static | None | Instant | Low | ❌ |
+| Hell's Gate | Low | Fast | Low | ❌ |
+| Halo's Gate | Medium | Fast | Medium | ❌ |
+| Tartarus' Gate | High | Fast | High | ❌ |
+| **FreshyCalls** | **Very High** | **Fast** | **Low** | ✅ |
+| [SyscallsFromDisk](/advanced/syscalls-from-disk) | Maximum | Slow | Medium | ❌ |
+| [RecycledGate](/advanced/recycled-gate) | Maximum | Medium | Medium | ✅ |
+
+## When to Use
+
+<AccordionGroup>
+  <Accordion title="Recommended For" icon="circle-check">
+    - **General-purpose evasion**: Excellent default choice for most scenarios
+    - **Fast initialization**: Minimal overhead during startup
+    - **Standard EDR environments**: Works against all common inline hook patterns
+    - **Red team operations**: Reliable without excessive complexity
+  </Accordion>
+
+  <Accordion title="Consider Alternatives When" icon="triangle-exclamation">
+    - **Maximum paranoia required**: Use [SyscallsFromDisk](/advanced/syscalls-from-disk) or [RecycledGate](/advanced/recycled-gate)
+    - **Export table manipulation detected**: Extremely rare; switch to SyscallsFromDisk
+    - **Kernel callbacks in use**: No user-mode technique bypasses ETW-Ti; requires kernel-mode evasion
+  </Accordion>
+</AccordionGroup>
+
+## Usage in SysWhispers4
+
+### Generate with FreshyCalls (Default)
+
+```bash
+# FreshyCalls is the default — no flag needed
+python syswhispers.py --preset common
+
+# Explicit specification
+python syswhispers.py --preset injection --resolve freshycalls
+```
+
+### Integration
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Initialize FreshyCalls SSN resolution
+    if (!SW4_Initialize()) {
+        fprintf(stderr, "[!] FreshyCalls initialization failed\n");
+        return 1;
+    }
+
+    // SSNs are now resolved — use syscalls
+    PVOID base = NULL;
+    SIZE_T size = 0x1000;
+    NTSTATUS st = SW4_NtAllocateVirtualMemory(
+        GetCurrentProcess(), &base, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+    );
+
+    return NT_SUCCESS(st) ? 0 : 1;
+}
+```
+
+## Detection Considerations
+
+### What EDRs Can See
+
+1. **Export table enumeration**: Iterating `ntdll` exports is common for legitimate software (loaders, debuggers)
+2. **qsort usage**: Generic sorting is not inherently suspicious
+3. **Memory reads of ntdll**: Standard PE parsing behavior
+
+### Detection Vectors
+
+- **Behavioral**: Syscall execution with RIP outside ntdll (if using embedded method)
+- **Memory scanning**: Signature detection of SysWhispers4 code patterns
+- **Call stack analysis**: Abnormal return addresses (mitigated by `--stack-spoof`)
+
+### Best Practices
+
+<Steps>
+  <Step title="Use indirect invocation">
+    Combine with `--method indirect` to keep RIP inside ntdll during syscalls:
+    ```bash
+    python syswhispers.py --resolve freshycalls --method indirect
+    ```
+  </Step>
+  
+  <Step title="Enable obfuscation">
+    Randomize stub ordering and inject junk instructions:
+    ```bash
+    python syswhispers.py --resolve freshycalls --obfuscate
+    ```
+  </Step>
+  
+  <Step title="Unhook ntdll first (optional)">
+    Remove hooks before FreshyCalls runs for maximum stealth:
+    ```c
+    SW4_UnhookNtdll();  // Remove all inline hooks
+    SW4_Initialize();    // FreshyCalls reads clean stubs
+    ```
+  </Step>
+</Steps>
+
+## Further Reading
+
+<CardGroup cols={2}>
+  <Card title="RecycledGate" icon="recycle" href="/advanced/recycled-gate">
+    Enhanced version combining FreshyCalls with opcode validation
+  </Card>
+  <Card title="SyscallsFromDisk" icon="hard-drive" href="/advanced/syscalls-from-disk">
+    Alternative that maps clean ntdll from disk
+  </Card>
+  <Card title="Invocation Methods" icon="paper-plane" href="/concepts/invocation-methods">
+    How to execute syscalls after SSN resolution
+  </Card>
+  <Card title="Original Research" icon="link" href="https://github.com/crummie5/FreshyCalls">
+    FreshyCalls by crummie5
+  </Card>
+</CardGroup>

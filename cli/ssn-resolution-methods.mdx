@@ -1,0 +1,652 @@
+---
+title: 'SSN Resolution Methods'
+description: 'Detailed documentation of System Service Number (SSN) resolution techniques'
+icon: 'hashtag'
+---
+
+## Overview
+
+The **System Service Number (SSN)** is a unique identifier for each NT kernel service. When making a syscall, the CPU needs to know which kernel function to invoke, and the SSN serves as this index.
+
+SysWhispers4 supports 8 different methods for resolving SSNs at generation time or runtime. Each method offers different tradeoffs between:
+
+- **Reliability** - Works even when ntdll is hooked by EDR
+- **Stealth** - Avoids detection by behavioral analysis
+- **Performance** - Speed of resolution
+- **Portability** - Works across Windows versions
+
+Use the `--resolve` flag to select a method.
+
+## Method Comparison
+
+| Method | Hook Resistance | Stealth | Speed | Version Support | Complexity |
+|--------|----------------|---------|-------|-----------------|------------|
+| [Static](#static) | ❌ Low | ⭐⭐⭐ High | ⚡⚡⚡ Instant | ⚠️ Requires updates | Low |
+| [FreshyCalls](#freshycalls-default) | ✅ High | ⭐⭐ Medium | ⚡⚡ Fast | ✅ All versions | Low |
+| [Hell's Gate](#hells-gate) | ❌ Fails if hooked | ⭐ Low | ⚡⚡⚡ Fast | ✅ All versions | Low |
+| [Halo's Gate](#halos-gate) | ⚠️ Medium | ⭐⭐ Medium | ⚡⚡ Fast | ✅ All versions | Medium |
+| [Tartarus' Gate](#tartarus-gate) | ✅ High | ⭐⭐ Medium | ⚡ Medium | ✅ All versions | Medium |
+| [From Disk](#from-disk) | ✅✅ Bypasses ALL | ⭐⭐⭐ High | ⚡ Slow (first call) | ✅ All versions | High |
+| [RecycledGate](#recycledgate) | ✅✅ Most resilient | ⭐⭐⭐ High | ⚡⚡ Fast | ✅ All versions | Medium |
+| [HW Breakpoint](#hardware-breakpoint) | ✅✅ Bypasses ALL | ⭐ Low (VEH) | ⚡ Slow | ✅ All versions | Very High |
+
+<Note>
+**Recommended:** Use `freshycalls` (default) for most scenarios, or `recycled` for maximum reliability.
+</Note>
+
+---
+
+## Static
+
+### Description
+
+Embeds SSNs directly into the generated code at generation time using a pre-built table from [j00ru's Windows syscall table](https://github.com/j00ru/windows-syscalls).
+
+### How It Works
+
+1. During generation, SysWhispers4 reads `data/syscalls_nt_x64.json`
+2. SSNs for each Windows build are embedded as constants in the generated assembly
+3. At runtime, the correct SSN is selected based on `ntdll.dll` version number
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --resolve static
+```
+
+### Advantages
+
+✅ **Instant resolution** - No runtime overhead  
+✅ **No ntdll interaction** - Doesn't need to parse ntdll  
+✅ **Simple implementation** - Just a lookup table
+
+### Disadvantages
+
+❌ **Not hook-resistant** - EDR hooks still affect the syscall itself  
+❌ **Requires updates** - New Windows builds need table updates  
+❌ **Larger binary** - Embeds multiple SSNs per function (one per Windows version)
+
+### When to Use
+
+- You know the exact target Windows version
+- You update the syscall table regularly with `scripts/update_syscall_table.py`
+- You want zero runtime overhead
+- You're not concerned about EDR hooks
+
+### Example Output
+
+```c
+// Generated code (simplified)
+DWORD GetSsnForNtAllocateVirtualMemory() {
+    if (WindowsVersion == WIN_10_1507) return 0x18;
+    if (WindowsVersion == WIN_10_1607) return 0x18;
+    if (WindowsVersion == WIN_11_22H2) return 0x18;
+    // ...
+}
+```
+
+### Custom Syscall Table
+
+You can provide your own syscall table:
+
+```bash
+python syswhispers.py --preset common --resolve static --syscall-table ./my_syscalls.json
+```
+
+<Tip>
+Run `python scripts/update_syscall_table.py` to fetch the latest SSN table from j00ru's repository.
+</Tip>
+
+---
+
+## FreshyCalls (Default)
+
+### Description
+
+**FreshyCalls** sorts all `Nt*` exports from ntdll by their virtual address (VA). Since Windows allocates SSNs sequentially as functions are added to ntdll, sorting by address effectively reconstructs the SSN order.
+
+### How It Works
+
+1. At runtime, enumerate all exports from `ntdll.dll` starting with "Nt" or "Zw"
+2. Sort them by their **virtual address** (RVA)
+3. The index in the sorted list = SSN
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --resolve freshycalls
+```
+
+This is the **default** if you don't specify `--resolve`.
+
+### Advantages
+
+✅ **Hook-resistant** - Doesn't read ntdll function bodies, so inline hooks don't break it  
+✅ **Version-agnostic** - Works on all Windows versions automatically  
+✅ **Fast** - Simple sort operation  
+✅ **Widely used** - Battle-tested technique
+
+### Disadvantages
+
+⚠️ **EDR visibility** - Walking ntdll exports may trigger heuristics  
+⚠️ **Assumption-based** - Relies on Microsoft's internal SSN allocation order
+
+### When to Use
+
+- You need hook resistance
+- You want to support multiple Windows versions without updates
+- You're okay with some EDR visibility (export walking is common)
+- **Recommended as default**
+
+### Example Code
+
+```c
+// Pseudocode
+void SW4Initialize() {
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    Export* exports = GetExports(ntdll);
+    
+    // Filter to Nt* functions
+    Export* ntFunctions = FilterByPrefix(exports, "Nt");
+    
+    // Sort by virtual address
+    SortByAddress(ntFunctions);
+    
+    // Index in sorted array = SSN
+    for (int i = 0; i < count; i++) {
+        if (strcmp(ntFunctions[i].name, "NtAllocateVirtualMemory") == 0) {
+            g_SsnNtAllocateVirtualMemory = i;
+        }
+    }
+}
+```
+
+### References
+
+- [Original FreshyCalls by crummie5](https://github.com/crummie5/FreshyCalls)
+
+---
+
+## Hell's Gate
+
+### Description
+
+**Hell's Gate** reads the SSN directly from the function stub in ntdll by parsing the machine code of the target function.
+
+### How It Works
+
+1. Resolve the address of the target NT function (e.g., `NtAllocateVirtualMemory`) in ntdll
+2. Read the first few bytes of the function
+3. Parse the `mov eax, <SSN>` instruction (opcodes: `4C 8B D1 B8 ?? 00 00 00`)
+4. Extract the SSN from the instruction bytes
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --resolve hells_gate
+```
+
+### Advantages
+
+✅ **Fast** - Simple memory read  
+✅ **Accurate** - Reads actual SSN from ntdll  
+✅ **Simple** - Easy to understand and implement
+
+### Disadvantages
+
+❌ **Fails if hooked** - If EDR patches the function prologue, SSN extraction fails  
+❌ **Not resilient** - Single point of failure  
+⚠️ **Signature-prone** - Opcode pattern matching is a known technique
+
+### When to Use
+
+- You're in an unhooked environment
+- You need fast SSN resolution
+- You want simplicity over resilience
+
+### Example Code
+
+```c
+DWORD GetSsnHellsGate(PVOID pFunctionAddress) {
+    BYTE* p = (BYTE*)pFunctionAddress;
+    
+    // Check for syscall stub pattern: mov r10, rcx; mov eax, <SSN>
+    if (p[0] == 0x4C && p[1] == 0x8B && p[2] == 0xD1 &&  // mov r10, rcx
+        p[3] == 0xB8) {                                   // mov eax, <SSN>
+        return *(DWORD*)(p + 4);  // Extract SSN
+    }
+    
+    return -1;  // Hooked or unexpected pattern
+}
+```
+
+### Typical Syscall Stub
+
+```asm
+NtAllocateVirtualMemory:
+    4C 8B D1             mov r10, rcx
+    B8 18 00 00 00       mov eax, 0x18      ; SSN = 0x18
+    0F 05                syscall
+    C3                   ret
+```
+
+### References
+
+- [Hell's Gate by am0nsec](https://github.com/am0nsec/HellsGate)
+- [VX Underground article](https://www.vx-underground.org/papers/VXUG/Exclusive/HellsGate.pdf)
+
+---
+
+## Halo's Gate
+
+### Description
+
+**Halo's Gate** extends Hell's Gate by scanning **neighboring functions** when the target function is hooked. It assumes that adjacent functions (by address) are likely unhooked and can be used to calculate the target SSN.
+
+### How It Works
+
+1. Try Hell's Gate on the target function
+2. If the function is hooked (prologue is modified):
+   - Scan **downward** (higher addresses) to find an unhooked `Nt*` function
+   - Read its SSN
+   - Calculate the target SSN by adding/subtracting the address offset
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --resolve halos_gate
+```
+
+### Advantages
+
+✅ **More resilient than Hell's Gate** - Can handle some hooked functions  
+✅ **Automatic fallback** - Scans neighbors if target is hooked  
+✅ **Version-agnostic** - Works across Windows versions
+
+### Disadvantages
+
+⚠️ **Fails if neighbors are hooked** - EDRs may hook multiple adjacent functions  
+⚠️ **Assumption-based** - Relies on SSN being sequential (usually true)  
+⚠️ **Slower** - Needs to scan multiple functions
+
+### When to Use
+
+- You expect some functions to be hooked
+- You need better reliability than Hell's Gate
+- You're okay with some scanning overhead
+
+### Example Code
+
+```c
+DWORD GetSsnHalosGate(LPCSTR functionName) {
+    PVOID pFunc = GetProcAddress(GetModuleHandleA("ntdll.dll"), functionName);
+    BYTE* p = (BYTE*)pFunc;
+    
+    // Try Hell's Gate first
+    if (IsValidSyscallStub(p)) {
+        return ExtractSsn(p);
+    }
+    
+    // Function is hooked, scan neighbors
+    for (int i = 1; i <= 32; i++) {
+        // Scan down (next functions)
+        BYTE* down = p + (i * 0x20);  // Typical function alignment
+        if (IsValidSyscallStub(down)) {
+            DWORD neighborSsn = ExtractSsn(down);
+            return neighborSsn - i;  // Assume sequential SSNs
+        }
+    }
+    
+    return -1;  // Failed to resolve
+}
+```
+
+### References
+
+- [Halo's Gate by Sektor7](https://blog.sektor7.net/#!res/2021/halosgate.md)
+
+---
+
+## Tartarus' Gate
+
+### Description
+
+**Tartarus' Gate** is an evolution of Halo's Gate that can handle both **near JMP** (`E9`) and **far JMP** (`FF 25`) hooks by following the jump to find the real function.
+
+### How It Works
+
+1. Check if the function starts with a JMP instruction:
+   - `E9` (near JMP, relative offset)
+   - `FF 25` (far JMP, indirect through memory)
+2. If hooked, follow the jump to the trampoline
+3. Try to extract the SSN from the trampoline or use Halo's Gate on neighbors
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --resolve tartarus
+```
+
+### Advantages
+
+✅ **Handles JMP hooks** - Works with inline hooking techniques  
+✅ **More resilient** - Follows trampolines to find real function  
+✅ **Better EDR evasion** - Avoids triggering hook detection
+
+### Disadvantages
+
+⚠️ **Complex** - More code paths to handle  
+⚠️ **Slower** - Multiple resolution steps  
+⚠️ **Still has limits** - May fail with advanced hooking techniques
+
+### When to Use
+
+- You know the EDR uses JMP-based hooks
+- You need to handle inline hooks gracefully
+- You want a balance between complexity and resilience
+
+### Hook Detection
+
+```c
+bool IsHookedWithJmp(BYTE* p) {
+    // Near JMP (E9 <offset>)
+    if (p[0] == 0xE9) return true;
+    
+    // Far JMP (FF 25 <offset>)
+    if (p[0] == 0xFF && p[1] == 0x25) return true;
+    
+    return false;
+}
+```
+
+### References
+
+- [Tartarus' Gate by trickster0](https://github.com/trickster0/TartarusGate)
+
+---
+
+## From Disk
+
+### Description
+
+**SyscallsFromDisk** (also called "From Disk") loads a **clean copy** of ntdll from `\KnownDlls` or disk and reads SSNs from it. This completely bypasses userland hooks since the loaded copy is untouched by EDR.
+
+### How It Works
+
+1. Open `\KnownDlls\ntdll.dll` (a clean, cached copy maintained by Windows)
+2. Map it into memory (separate from the hooked ntdll)
+3. Parse the clean ntdll to extract SSNs using Hell's Gate or FreshyCalls
+4. Unmap the clean copy
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --resolve from_disk
+```
+
+### Advantages
+
+✅✅ **Bypasses ALL userland hooks** - Clean ntdll is never touched by EDR  
+✅ **Most reliable** - Guaranteed to get correct SSNs  
+✅ **No opcode parsing issues** - Clean stubs are always valid
+
+### Disadvantages
+
+⚠️ **Slower** - Requires loading and parsing a DLL  
+⚠️ **EDR visibility** - Opening `\KnownDlls` or reading from disk is highly suspicious  
+⚠️ **More complex** - Requires manual PE parsing
+
+### When to Use
+
+- You're in a heavily hooked environment
+- You need 100% reliable SSN resolution
+- You're willing to accept the EDR visibility tradeoff
+
+### Example Code
+
+```c
+void SW4Initialize() {
+    // Open KnownDlls\ntdll.dll
+    HANDLE hSection;
+    NtOpenSection(&hSection, SECTION_MAP_READ, "\\KnownDlls\\ntdll.dll");
+    
+    // Map into memory
+    PVOID pCleanNtdll;
+    NtMapViewOfSection(hSection, GetCurrentProcess(), &pCleanNtdll, ...);
+    
+    // Parse clean ntdll to extract SSNs
+    for (each function) {
+        PVOID pFunc = GetExportFromModule(pCleanNtdll, "NtAllocateVirtualMemory");
+        DWORD ssn = ExtractSsnHellsGate(pFunc);
+        StoreSsn("NtAllocateVirtualMemory", ssn);
+    }
+    
+    // Cleanup
+    NtUnmapViewOfSection(GetCurrentProcess(), pCleanNtdll);
+    NtClose(hSection);
+}
+```
+
+### Alternative: Load from Disk
+
+If `\KnownDlls` access is blocked:
+
+```c
+HANDLE hFile = CreateFileA("C:\\Windows\\System32\\ntdll.dll", GENERIC_READ, ...);
+HANDLE hMapping = CreateFileMappingA(hFile, NULL, PAGE_READONLY, ...);
+PVOID pCleanNtdll = MapViewOfFile(hMapping, FILE_MAP_READ, ...);
+```
+
+### References
+
+- [KnownDlls technique discussion](https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-and-direct-invocation-of-system-calls-for-red-teams/)
+
+---
+
+## RecycledGate
+
+### Description
+
+**RecycledGate** combines **FreshyCalls** (sorting by VA) with **opcode validation** (Hell's Gate) to provide maximum reliability. It sorts functions by address, then validates the SSN by checking the actual syscall stub.
+
+### How It Works
+
+1. Use FreshyCalls to sort ntdll exports by address → get candidate SSN
+2. Use Hell's Gate to read the actual SSN from the function stub
+3. **Cross-validate**: If both methods agree, the SSN is correct
+4. If they disagree, the function is hooked → use the FreshyCalls result (or flag as suspicious)
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --resolve recycled
+```
+
+### Advantages
+
+✅✅ **Most resilient** - Combines two independent methods  
+✅ **Hook detection** - Can detect when functions are hooked  
+✅ **Accurate** - Validates SSNs for correctness  
+✅ **Fast** - Only slightly slower than FreshyCalls alone
+
+### Disadvantages
+
+⚠️ **More complex** - Implements two resolution methods  
+⚠️ **Still visible** - EDR can see export walking
+
+### When to Use
+
+- You want maximum reliability
+- You need to detect hooked functions
+- You want the best of both worlds (FreshyCalls + Hell's Gate)
+- **Recommended for stealth configurations**
+
+### Example Code
+
+```c
+void SW4Initialize() {
+    // Step 1: FreshyCalls (sort by VA)
+    Export* sorted = SortExportsByVA("ntdll.dll", "Nt*");
+    
+    for (int i = 0; i < count; i++) {
+        DWORD ssnFreshy = i;  // Index = SSN
+        
+        // Step 2: Hell's Gate (read from stub)
+        PVOID pFunc = sorted[i].address;
+        DWORD ssnHells = ExtractSsnHellsGate(pFunc);
+        
+        // Step 3: Cross-validate
+        if (ssnFreshy == ssnHells) {
+            // Both agree, SSN is correct
+            StoreSsn(sorted[i].name, ssnFreshy);
+        } else {
+            // Mismatch! Function is likely hooked
+            // Use FreshyCalls result (more reliable)
+            StoreSsn(sorted[i].name, ssnFreshy);
+        }
+    }
+}
+```
+
+### References
+
+- [RecycledGate by thefLink](https://github.com/thefLink/RecycledGate)
+
+---
+
+## Hardware Breakpoint
+
+### Description
+
+**HW Breakpoint** uses **hardware breakpoints** and **Vectored Exception Handling (VEH)** to intercept the syscall instruction and extract the SSN from the `EAX` register at runtime.
+
+### How It Works
+
+1. Set a hardware breakpoint on the target NT function using debug registers (DR0-DR3)
+2. Register a Vectored Exception Handler (VEH) to catch `EXCEPTION_SINGLE_STEP`
+3. Call the NT function
+4. The breakpoint triggers before the syscall executes
+5. Read the SSN from the `EAX` register in the exception context
+6. Remove the breakpoint and continue execution
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --resolve hw_breakpoint
+```
+
+### Advantages
+
+✅✅ **Bypasses all hooks** - Reads SSN after EDR hook but before syscall  
+✅ **No opcode parsing** - Directly reads CPU registers  
+✅ **Advanced technique** - Uncommon, harder to detect
+
+### Disadvantages
+
+❌ **Very complex** - Requires VEH, debug registers, exception handling  
+❌ **Very slow** - Triggering exceptions has overhead  
+❌ **EDR visibility** - VEH registration and debug register use may trigger alerts  
+❌ **Debugger conflicts** - Doesn't work if a debugger is attached  
+❌ **Limited breakpoints** - Only 4 hardware breakpoints available
+
+### When to Use
+
+- You want to experiment with advanced techniques
+- You're researching new evasion methods
+- **Not recommended for production** - Too slow and complex
+
+### Example Code
+
+```c
+LONG CALLBACK VehHandler(EXCEPTION_POINTERS* ExceptionInfo) {
+    if (ExceptionInfo->ExceptionRecord->ExceptionCode == EXCEPTION_SINGLE_STEP) {
+        // Hardware breakpoint triggered
+        DWORD ssn = ExceptionInfo->ContextRecord->Rax;  // SSN is in EAX
+        StoreSsn(g_CurrentFunction, ssn);
+        
+        // Clear breakpoint
+        ExceptionInfo->ContextRecord->Dr0 = 0;
+        ExceptionInfo->ContextRecord->Dr7 &= ~(1 << 0);
+        
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void ResolveSsnHwBreakpoint(LPCSTR functionName) {
+    AddVectoredExceptionHandler(1, VehHandler);
+    
+    PVOID pFunc = GetProcAddress(GetModuleHandleA("ntdll.dll"), functionName);
+    
+    // Set hardware breakpoint on function entry
+    CONTEXT ctx = {0};
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    GetThreadContext(GetCurrentThread(), &ctx);
+    ctx.Dr0 = (DWORD64)pFunc;
+    ctx.Dr7 = 0x00000001;  // Enable DR0
+    SetThreadContext(GetCurrentThread(), &ctx);
+    
+    // Call the function (will trigger breakpoint)
+    g_CurrentFunction = functionName;
+    ((void(*)())pFunc)();  // Breakpoint fires before syscall
+}
+```
+
+### References
+
+- [Hardware Breakpoint Syscalls](https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-and-direct-invocation-of-system-calls-for-red-teams/)
+
+---
+
+## Choosing the Right Method
+
+### Decision Tree
+
+```
+Do you know the exact Windows version?
+├─ Yes → Consider `static` (but update table regularly)
+└─ No ↓
+
+Is the environment heavily hooked by EDR?
+├─ Yes ↓
+│   ├─ Need maximum reliability? → `recycled` or `from_disk`
+│   ├─ Need to handle JMP hooks? → `tartarus`
+│   └─ Willing to trade speed for stealth? → `from_disk`
+└─ No or Unknown ↓
+
+Do you need simplicity and speed?
+├─ Yes → `freshycalls` (default)
+└─ No → `recycled` (more validation)
+
+Are you doing research or testing?
+└─ `hw_breakpoint` (advanced, experimental)
+```
+
+### Recommended Configurations
+
+**General Use (Default):**
+```bash
+python syswhispers.py --preset common --resolve freshycalls
+```
+
+**Maximum Stealth:**
+```bash
+python syswhispers.py --preset stealth --resolve recycled
+```
+
+**Heavily Hooked Environment:**
+```bash
+python syswhispers.py --preset stealth --resolve from_disk
+```
+
+**Known Windows Version:**
+```bash
+python syswhispers.py --preset common --resolve static
+```
+
+## See Also
+
+- [Command Reference](/cli/command-reference) - All CLI flags
+- [Invocation Methods](/cli/invocation-methods) - How syscalls are executed
+- [Evasion Options](/cli/evasion-options) - Additional evasion techniques
+- [Configuration Guide](/guides/basic-usage) - Choosing the right options

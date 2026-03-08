@@ -1,122 +1,125 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "SysWhispers4",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#9b9b9c",
+    "light": "#d4d4d4",
+    "dark": "#9b9b9c"
   },
-  "favicon": "/favicon.svg",
+  "favicon": "/favicon.png",
+  "logo": {
+    "light": "/logo-dark.png",
+    "dark": "/logo-dark.png"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/JoasASantos/SysWhispers4"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/JoasASantos/SysWhispers4"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "installation"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/ssn-resolution",
+              "concepts/invocation-methods",
+              "concepts/evasion-techniques",
+              "concepts/architecture-support"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Guides",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "guides/basic-usage",
+              "guides/advanced-evasion",
+              "guides/integration-msvc",
+              "guides/integration-mingw",
+              "guides/presets"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Command Reference",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "cli/command-reference",
+              "cli/ssn-resolution-methods",
+              "cli/invocation-methods",
+              "cli/evasion-options"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Generated API",
             "pages": [
-              "api-reference/introduction"
+              "api/overview",
+              "api/initialization",
+              "api/memory-functions",
+              "api/process-thread-functions",
+              "api/file-functions",
+              "api/token-functions",
+              "api/evasion-helpers"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Function Categories",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/supported-functions"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Advanced",
+        "groups": [
+          {
+            "group": "Techniques Deep Dive",
+            "pages": [
+              "advanced/freshycalls",
+              "advanced/syscalls-from-disk",
+              "advanced/recycled-gate",
+              "advanced/hw-breakpoint",
+              "advanced/sleep-encryption",
+              "advanced/stack-spoofing"
+            ]
+          },
+          {
+            "group": "Detection & Evasion",
+            "pages": [
+              "advanced/edr-detection",
+              "advanced/recommended-configs",
+              "advanced/etw-ti-limitations"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "advanced/project-structure",
+              "advanced/syscall-table-updates"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

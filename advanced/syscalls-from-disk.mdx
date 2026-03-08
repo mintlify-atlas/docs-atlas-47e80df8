@@ -1,0 +1,392 @@
+---
+title: 'SyscallsFromDisk'
+description: 'Map clean ntdll from disk to extract SSNs, bypassing all inline hooks'
+icon: 'hard-drive'
+---
+
+## Overview
+
+SyscallsFromDisk achieves **maximum hook resistance** by mapping a completely clean, unhookedcopy of `ntdll.dll` from `\KnownDlls\ntdll.dll` or directly from disk, then extracting SSNs from the pristine `.text` section. Since the mapped copy is never touched by EDR hooks, all opcode reads are guaranteed clean.
+
+<Warning>
+This technique is **slower** (~10-20ms initialization) than FreshyCalls due to file mapping operations. Use when maximum reliability is critical.
+</Warning>
+
+## The Problem: All Stubs Hooked
+
+In heavily monitored environments, EDRs may hook:
+- Every `Nt*` function in the running ntdll (defeats Hell's/Halo's/Tartarus' Gate)
+- Export table entries (could theoretically defeat FreshyCalls)
+- Syscall return addresses (defeats some indirect methods)
+
+SyscallsFromDisk bypasses **all** of these by reading from a hook-free source.
+
+## How It Works
+
+### High-Level Flow
+
+```mermaid
+graph LR
+    A[Open \KnownDlls\ntdll.dll] --> B[Map View]
+    B --> C[Parse Clean Export Table]
+    C --> D[Read SSN from Clean Opcodes]
+    D --> E[Unmap + Close]
+    E --> F[Use SSNs for Syscalls]
+```
+
+### Step-by-Step
+
+<Steps>
+  <Step title="Open \KnownDlls\ntdll.dll">
+    Windows maintains a shared section object at `\KnownDlls\ntdll.dll` containing the original, unmodified ntdll.
+    
+    ```c
+    UNICODE_STRING objName;
+    RtlInitUnicodeString(&objName, L"\\KnownDlls\\ntdll.dll");
+    
+    OBJECT_ATTRIBUTES objAttr;
+    InitializeObjectAttributes(&objAttr, &objName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    
+    HANDLE hSection = NULL;
+    NTSTATUS status = NtOpenSection(&hSection, SECTION_MAP_READ, &objAttr);
+    ```
+  </Step>
+
+  <Step title="Map the Clean Section">
+    Create a read-only view of the clean ntdll in our process address space:
+    
+    ```c
+    PVOID pCleanNtdll = NULL;
+    SIZE_T viewSize = 0;
+    status = NtMapViewOfSection(
+        hSection, GetCurrentProcess(),
+        &pCleanNtdll, 0, 0, NULL, &viewSize,
+        ViewShare, 0, PAGE_READONLY
+    );
+    ```
+  </Step>
+
+  <Step title="Parse Export Table">
+    Identical to FreshyCalls, but reading from the **clean** mapped copy:
+    
+    ```c
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)pCleanNtdll;
+    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((PBYTE)pCleanNtdll + dos->e_lfanew);
+    // ... extract export directory from clean ntdll
+    ```
+  </Step>
+
+  <Step title="Read SSNs from Opcodes">
+    Read the `mov eax, <SSN>` opcode (Hell's Gate style) from the **unhooked** stubs:
+    
+    ```c
+    PVOID funcAddr = (PBYTE)pCleanNtdll + funcRva;
+    PBYTE code = (PBYTE)funcAddr;
+    
+    // Check for: 4C 8B D1 B8 [SSN_lo] [SSN_hi] 00 00
+    if (code[0] == 0x4C && code[1] == 0x8B && code[2] == 0xD1 &&
+        code[3] == 0xB8) {
+        DWORD ssn = *(DWORD*)(code + 4);  // Guaranteed clean!
+        SW4_SsnTable[funcIndex] = ssn;
+    }
+    ```
+  </Step>
+
+  <Step title="Cleanup">
+    Unmap the section and close handles:
+    
+    ```c
+    NtUnmapViewOfSection(GetCurrentProcess(), pCleanNtdll);
+    NtClose(hSection);
+    ```
+  </Step>
+</Steps>
+
+## Implementation
+
+### Full C Code
+
+```c
+BOOL SW4_SyscallsFromDisk(VOID) {
+    // 1. Open \KnownDlls\ntdll.dll section
+    UNICODE_STRING uObjName;
+    RtlInitUnicodeString(&uObjName, L"\\KnownDlls\\ntdll.dll");
+
+    OBJECT_ATTRIBUTES objAttr;
+    InitializeObjectAttributes(&objAttr, &uObjName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    HANDLE hSection = NULL;
+    NTSTATUS status = NtOpenSection(&hSection, SECTION_MAP_READ, &objAttr);
+    if (!NT_SUCCESS(status)) {
+        // Fallback: open ntdll.dll from System32
+        return SW4_SyscallsFromDiskFile(L"C:\\Windows\\System32\\ntdll.dll");
+    }
+
+    // 2. Map read-only view
+    PVOID pCleanNtdll = NULL;
+    SIZE_T viewSize = 0;
+    status = NtMapViewOfSection(
+        hSection, GetCurrentProcess(),
+        &pCleanNtdll, 0, 0, NULL, &viewSize,
+        ViewShare, 0, PAGE_READONLY
+    );
+    if (!NT_SUCCESS(status)) {
+        NtClose(hSection);
+        return FALSE;
+    }
+
+    // 3. Parse PE headers
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)pCleanNtdll;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        NtUnmapViewOfSection(GetCurrentProcess(), pCleanNtdll);
+        NtClose(hSection);
+        return FALSE;
+    }
+
+    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((PBYTE)pCleanNtdll + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) {
+        NtUnmapViewOfSection(GetCurrentProcess(), pCleanNtdll);
+        NtClose(hSection);
+        return FALSE;
+    }
+
+    PIMAGE_EXPORT_DIRECTORY exports = (PIMAGE_EXPORT_DIRECTORY)(
+        (PBYTE)pCleanNtdll + 
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress
+    );
+
+    PDWORD nameRvas = (PDWORD)((PBYTE)pCleanNtdll + exports->AddressOfNames);
+    PDWORD funcRvas = (PDWORD)((PBYTE)pCleanNtdll + exports->AddressOfFunctions);
+    PWORD ordinals = (PWORD)((PBYTE)pCleanNtdll + exports->AddressOfNameOrdinals);
+
+    // 4. Extract SSNs from clean opcodes
+    for (DWORD i = 0; i < exports->NumberOfNames; i++) {
+        PCHAR name = (PCHAR)((PBYTE)pCleanNtdll + nameRvas[i]);
+        if (name[0] != 'N' || name[1] != 't') continue;
+
+        DWORD hash = djb2_hash(name);
+        PVOID funcAddr = (PBYTE)pCleanNtdll + funcRvas[ordinals[i]];
+        PBYTE code = (PBYTE)funcAddr;
+
+        // Match against our function table
+        for (DWORD j = 0; j < SW4_FUNC_COUNT; j++) {
+            if (SW4_FunctionHashes[j] == hash) {
+                // Read SSN from: B8 [SSN] 00 00 (mov eax, ssn)
+                if (code[0] == 0x4C && code[1] == 0x8B && code[2] == 0xD1 &&
+                    code[3] == 0xB8) {
+                    DWORD ssn = *(DWORD*)(code + 4);
+                    SW4_SsnTable[j] = ssn;
+                }
+                break;
+            }
+        }
+    }
+
+    // 5. Cleanup
+    NtUnmapViewOfSection(GetCurrentProcess(), pCleanNtdll);
+    NtClose(hSection);
+    return TRUE;
+}
+```
+
+## Advantages
+
+<CardGroup cols={2}>
+  <Card title="Absolute Hook Immunity" icon="shield">
+    EDR hooks in the running ntdll are **completely irrelevant** — we read from an untouched copy
+  </Card>
+  <Card title="Opcode Validation" icon="magnifying-glass">
+    Can safely use Hell's Gate opcode reading since the source is guaranteed clean
+  </Card>
+  <Card title="Export Table Independent" icon="table">
+    If EDR modifies the export table (extremely rare), we're unaffected — we map from KnownDlls
+  </Card>
+  <Card title="Future-Proof" icon="clock">
+    Works across all Windows versions — KnownDlls always contains the pristine image
+  </Card>
+</CardGroup>
+
+## Performance Cost
+
+| Operation | Time (Typical) | Notes |
+|-----------|:-:|-------|
+| `NtOpenSection` | ~2ms | Kernel object lookup |
+| `NtMapViewOfSection` | ~5ms | Page table setup |
+| Export parsing | ~1ms | Standard PE walk |
+| SSN extraction | ~2ms | Loop over Nt* exports |
+| `NtUnmapViewOfSection` | ~1ms | Cleanup |
+| **Total** | **~10-15ms** | vs. ~1-2ms for FreshyCalls |
+
+<Info>
+The overhead is **one-time** during `SW4_Initialize()`. Once SSNs are cached, syscalls execute at full speed.
+</Info>
+
+## Limitations & Edge Cases
+
+### 1. KnownDlls Access Restrictions
+
+In **sandboxed** or **restricted** processes, `\KnownDlls\` may not be accessible:
+
+```c
+// Error: STATUS_ACCESS_DENIED or STATUS_OBJECT_NAME_NOT_FOUND
+NtOpenSection(&hSection, SECTION_MAP_READ, &objAttr);
+```
+
+**Mitigation**: Fallback to reading from `C:\Windows\System32\ntdll.dll`:
+
+```c
+BOOL SW4_SyscallsFromDiskFile(LPCWSTR path) {
+    HANDLE hFile = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ,
+                               NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return FALSE;
+
+    HANDLE hMapping = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    CloseHandle(hFile);
+    if (!hMapping) return FALSE;
+
+    PVOID pCleanNtdll = MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0);
+    CloseHandle(hMapping);
+    if (!pCleanNtdll) return FALSE;
+
+    // ... same SSN extraction as above ...
+
+    UnmapViewOfFile(pCleanNtdll);
+    return TRUE;
+}
+```
+
+### 2. NTDLL Backed by Non-Standard Path
+
+In rare cases (custom Windows PE loaders, Wine), ntdll may be loaded from a non-standard location. The System32 fallback handles this.
+
+### 3. Performance in Tight Loops
+
+If you need to **repeatedly** re-resolve SSNs (unusual), cache results rather than re-mapping.
+
+## Comparison with Alternatives
+
+| Feature | FreshyCalls | SyscallsFromDisk | RecycledGate | HW Breakpoint |
+|---------|:-:|:-:|:-:|:-:|
+| Hook resistance | Very High | **Maximum** | **Maximum** | **Maximum** |
+| Speed | Fast (~2ms) | Slow (~15ms) | Medium (~5ms) | Slow (~20ms) |
+| Complexity | Low | Medium | Medium | High |
+| Sandbox compatible | ✅ | ⚠️ (may fail) | ✅ | ✅ |
+| Kernel callback bypass | ❌ | ❌ | ❌ | ❌ |
+
+## When to Use
+
+<AccordionGroup>
+  <Accordion title="Use SyscallsFromDisk When" icon="circle-check">
+    - **Maximum paranoia** required (government, high-security targets)
+    - **All stubs are hooked** in the running ntdll
+    - **Export table manipulation** suspected (extremely rare)
+    - **Single initialization** acceptable (performance cost amortized)
+    - **Combining with ntdll unhooking** for layered defense:
+      ```c
+      SW4_UnhookNtdll();           // Remove hooks from running ntdll
+      SW4_SyscallsFromDisk();       // Resolve SSNs from clean copy
+      ```
+  </Accordion>
+
+  <Accordion title="Avoid When" icon="xmark">
+    - **Speed is critical** — use FreshyCalls instead
+    - **Running in sandboxes** (AppContainer, low-integrity) — KnownDlls may be blocked
+    - **Repeated initialization** needed — cache SSNs after first resolution
+  </Accordion>
+</AccordionGroup>
+
+## Usage in SysWhispers4
+
+### Generate with SyscallsFromDisk
+
+```bash
+# Basic usage
+python syswhispers.py --preset injection --resolve from_disk
+
+# Recommended: combine with indirect invocation + unhooking
+python syswhispers.py --preset stealth \
+    --resolve from_disk \
+    --method indirect \
+    --unhook-ntdll \
+    --obfuscate
+```
+
+### Integration Example
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    // Optional: unhook running ntdll first
+    SW4_UnhookNtdll();
+
+    // Initialize via SyscallsFromDisk
+    if (!SW4_Initialize()) {
+        fprintf(stderr, "[!] SyscallsFromDisk failed\n");
+        return 1;
+    }
+
+    printf("[+] SSNs resolved from clean ntdll\n");
+
+    // Use syscalls — all SSNs are from the unhooked copy
+    PVOID base = NULL;
+    SIZE_T size = 0x1000;
+    NTSTATUS st = SW4_NtAllocateVirtualMemory(
+        GetCurrentProcess(), &base, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+    );
+
+    return NT_SUCCESS(st) ? 0 : 1;
+}
+```
+
+## Detection Vectors
+
+### What EDRs Can Observe
+
+1. **KnownDlls access**: Calling `NtOpenSection("\\KnownDlls\\ntdll.dll")` is visible via kernel callbacks
+2. **Section mapping**: EDRs can track `NtMapViewOfSection` calls
+3. **Timing anomaly**: 15ms initialization is longer than normal API calls
+
+### Mitigation Strategies
+
+<Steps>
+  <Step title="Combine with ntdll unhooking">
+    EDRs see both operations but struggle to correlate:
+    ```c
+    SW4_UnhookNtdll();       // Remove hooks
+    SW4_Initialize();         // Resolve from disk
+    ```
+  </Step>
+
+  <Step title="Use indirect invocation">
+    Keep RIP inside ntdll during syscalls:
+    ```bash
+    python syswhispers.py --resolve from_disk --method randomized
+    ```
+  </Step>
+
+  <Step title="Enable sleep encryption">
+    Encrypt .text during idle periods:
+    ```bash
+    python syswhispers.py --resolve from_disk --sleep-encrypt
+    ```
+  </Step>
+</Steps>
+
+## Further Reading
+
+<CardGroup cols={2}>
+  <Card title="FreshyCalls" icon="sort" href="/advanced/freshycalls">
+    Faster alternative with very high hook resistance
+  </Card>
+  <Card title="RecycledGate" icon="recycle" href="/advanced/recycled-gate">
+    Hybrid approach combining sorting + opcode validation
+  </Card>
+  <Card title="ntdll Unhooking" icon="broom" href="/api/evasion-helpers#unhook-ntdll">
+    Complement by removing hooks from running ntdll
+  </Card>
+  <Card title="KnownDlls Deep Dive" icon="book" href="https://www.alex-ionescu.com/?p=43">
+    Alex Ionescu on Windows KnownDlls
+  </Card>
+</CardGroup>

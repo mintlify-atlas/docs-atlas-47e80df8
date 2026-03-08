@@ -1,0 +1,200 @@
+---
+title: Introduction to SysWhispers4
+description: Advanced syscall stub generator for AV/EDR evasion via direct and indirect system calls on Windows
+---
+
+## Overview
+
+SysWhispers4 is a Python-based syscall stub generator that produces C/ASM code for invoking NT kernel functions directly, **bypassing user-mode hooks** placed by AV/EDR products on `ntdll.dll`.
+
+<Note>
+SysWhispers4 supports **Windows NT 3.1 through Windows 11 24H2** across x64, x86, WoW64, and ARM64 architectures.
+</Note>
+
+## Why SysWhispers4?
+
+Modern endpoint security products (AV/EDR) monitor suspicious API calls by placing hooks in user-mode libraries like `ntdll.dll`. When your program calls functions like `VirtualAllocEx` or `CreateRemoteThread`, the EDR intercepts these calls before they reach the kernel.
+
+**SysWhispers4 bypasses these hooks** by:
+- Generating syscall stubs that invoke NT functions directly via the `syscall` instruction
+- Never calling through hooked `ntdll.dll` functions
+- Providing 8 different SSN (System Service Number) resolution methods to handle various EDR hooking strategies
+- Offering 4 invocation techniques to evade detection at the syscall boundary
+
+### Key Capabilities
+
+<CardGroup cols={2}>
+  <Card title="8 SSN Resolution Methods" icon="magnifying-glass">
+    From simple static tables to advanced hardware breakpoint extraction — bypass any hook
+  </Card>
+  <Card title="4 Invocation Techniques" icon="bolt">
+    Direct, indirect, randomized, and egg hunt methods to evade RIP-based detection
+  </Card>
+  <Card title="8 Evasion Features" icon="shield">
+    ETW/AMSI bypass, ntdll unhooking, anti-debug, sleep encryption, and more
+  </Card>
+  <Card title="64 NT Functions" icon="layer-group">
+    Comprehensive coverage of memory, process, thread, file, and token operations
+  </Card>
+</CardGroup>
+
+## Evolution: SysWhispers 1 → 4
+
+SysWhispers4 builds on the lineage of:
+- [SysWhispers](https://github.com/jthuraisamy/SysWhispers) (v1)
+- [SysWhispers2](https://github.com/jthuraisamy/SysWhispers2) (v2)
+- [SysWhispers3](https://github.com/klezVirus/SysWhispers3) (v3)
+
+### Major Improvements in v4
+
+<Steps>
+  <Step title="New SSN Resolution Methods">
+    - **SyscallsFromDisk**: Maps clean ntdll from `\KnownDlls` — bypasses ALL hooks
+    - **RecycledGate**: Combines FreshyCalls + opcode validation for maximum resilience
+    - **HW Breakpoint**: Uses debug registers (DR0-DR3) + VEH to extract SSNs
+    - **Static + dynamic fallback**: Hybrid approach for reliability
+  </Step>
+  
+  <Step title="ARM64 Architecture Support">
+    Full support for Windows on ARM using `svc #0` instruction and `w8` register for SSN
+  </Step>
+  
+  <Step title="Advanced Evasion Techniques">
+    - AMSI bypass (patches `AmsiScanBuffer`)
+    - ntdll unhooking (remap clean `.text` from KnownDlls)
+    - Anti-debugging (6 detection checks)
+    - Sleep encryption (Ekko-style memory XOR during sleep)
+    - Junk instruction injection (14 variants)
+    - Stack spoofing (synthetic return addresses)
+  </Step>
+  
+  <Step title="Fixed Randomized Indirect Bug">
+    SW3's randomized method had a register-corruption bug where `RDTSC` overwrites `edx` (arg2). SW4 correctly saves `rdx → r11` before `rdtsc` and restores it without touching the stack.
+  </Step>
+</Steps>
+
+## How It Works
+
+<Steps>
+  <Step title="Generate Syscall Stubs">
+    Run SysWhispers4 to generate C/ASM files containing syscall stubs for your chosen NT functions.
+    
+    ```bash
+    python syswhispers.py --preset common --method indirect --resolve freshycalls
+    ```
+  </Step>
+  
+  <Step title="Integrate Into Your Project">
+    Add the generated files to your Visual Studio, MinGW, or Clang project. For MSVC, enable MASM support.
+  </Step>
+  
+  <Step title="Initialize at Runtime">
+    Call `SW4_Initialize()` to resolve syscall numbers using your chosen technique (FreshyCalls, Hell's Gate, etc.)
+  </Step>
+  
+  <Step title="Use NT Functions Directly">
+    Call generated functions like `SW4_NtAllocateVirtualMemory()` — they bypass all user-mode hooks and invoke the kernel directly.
+  </Step>
+</Steps>
+
+## Architecture Overview
+
+```
+Your Application
+       ↓
+  SW4_NtAllocateVirtualMemory()  ← Generated stub
+       ↓
+  mov r10, rcx                    ← Setup syscall ABI
+  mov eax, [SSN]                  ← Load syscall number
+  syscall                          ← Direct kernel entry
+       ↓
+  Windows Kernel (ntoskrnl.exe)
+       ↓
+  Memory allocation performed
+```
+
+<Note>
+**Traditional API call path** (hooked by EDR):
+```
+Your App → VirtualAllocEx → kernel32.dll → ntdll.dll (HOOKED) → kernel
+```
+
+**SysWhispers4 path** (bypasses hooks):
+```
+Your App → SW4_NtAllocateVirtualMemory → syscall → kernel
+```
+</Note>
+
+## Feature Comparison
+
+| Feature | SW1 | SW2 | SW3 | **SW4** |
+|---------|-----|-----|-----|----------|
+| **SSN Resolution** |
+| Static embedded table | ✅ | ✅ | ✅ | ✅ |
+| Hell's Gate | ❌ | ✅ | ✅ | ✅ |
+| Halo's Gate | ❌ | ❌ | ✅ | ✅ |
+| Tartarus' Gate | ❌ | ❌ | Partial | ✅ |
+| FreshyCalls | ❌ | ❌ | ❌ | ✅ |
+| SyscallsFromDisk | ❌ | ❌ | ❌ | ✅ |
+| RecycledGate | ❌ | ❌ | ❌ | ✅ |
+| HW Breakpoint | ❌ | ❌ | ❌ | ✅ |
+| **Invocation** |
+| Embedded (direct) | ✅ | ✅ | ✅ | ✅ |
+| Indirect | ❌ | ❌ | ✅ | ✅ |
+| Randomized | ❌ | ❌ | Buggy | ✅ Fixed |
+| Egg hunt | ❌ | ❌ | ✅ | ✅ |
+| **Architecture** |
+| x64 | ✅ | ✅ | ✅ | ✅ |
+| x86 | ❌ | ❌ | ✅ | ✅ |
+| WoW64 | ❌ | ❌ | ✅ | ✅ |
+| ARM64 | ❌ | ❌ | ❌ | ✅ |
+| **Compilers** |
+| MSVC (MASM) | ✅ | ✅ | ✅ | ✅ |
+| MinGW/GCC | ❌ | ❌ | ✅ | ✅ |
+| Clang | ❌ | ❌ | ✅ | ✅ |
+| **Evasion** |
+| Function hashing | ❌ | ✅ | ✅ | ✅ (DJB2) |
+| Junk injection | ❌ | ❌ | ❌ | ✅ (14 variants) |
+| XOR SSN encryption | ❌ | ❌ | ❌ | ✅ |
+| Stack spoofing | ❌ | ❌ | ❌ | ✅ |
+| ETW/AMSI bypass | ❌ | ❌ | ❌ | ✅ |
+| ntdll unhooking | ❌ | ❌ | ❌ | ✅ |
+| Anti-debugging | ❌ | ❌ | ❌ | ✅ |
+| Sleep encryption | ❌ | ❌ | ❌ | ✅ |
+| **Coverage** |
+| Supported functions | ~12 | ~12 | ~35 | **64** |
+| Windows 11 24H2 | ❌ | ❌ | Partial | ✅ |
+| Server 2022/2025 | ❌ | ❌ | ❌ | ✅ |
+
+## Use Cases
+
+<Warning>
+**Security Notice**: SysWhispers4 is a security research and authorized penetration testing tool. Use only:
+- On systems you own or have explicit written authorization to test
+- In CTF competitions
+- For defensive research (understanding offensive techniques to improve detection)
+- For developing security product signatures
+
+Unauthorized use is illegal in most jurisdictions.
+</Warning>
+
+### Legitimate Applications
+
+<CardGroup cols={2}>
+  <Card title="Red Team Operations" icon="user-secret">
+    Authorized penetration testing and adversary simulation exercises
+  </Card>
+  <Card title="EDR Testing" icon="shield-halved">
+    Validate detection capabilities of endpoint security products
+  </Card>
+  <Card title="Security Research" icon="flask">
+    Study syscall-based evasion techniques for defensive improvements
+  </Card>
+  <Card title="CTF Competitions" icon="flag">
+    Capture-the-flag challenges requiring Windows exploitation
+  </Card>
+</CardGroup>
+
+## What's Next?
+
+Ready to get started? Follow the [Installation](/installation) guide to set up your environment, then jump to the [Quick Start](/quickstart) to generate your first syscall stubs.

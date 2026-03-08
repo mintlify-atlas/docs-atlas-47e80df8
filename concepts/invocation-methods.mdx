@@ -1,0 +1,258 @@
+---
+title: 'Invocation Methods'
+description: 'Different techniques for executing syscalls while evading EDR detection'
+icon: 'paper-plane'
+---
+
+## What is Syscall Invocation?
+
+Once you have the correct SSN (System Service Number), you need to execute the actual `syscall` instruction to transition from user-mode to kernel-mode. The **invocation method** determines where the `syscall` instruction lives and how it's executed.
+
+Different invocation methods have different detection profiles for AV/EDR products.
+
+## Why It Matters: RIP Visibility
+
+When a syscall transitions to kernel-mode, the kernel can inspect the **instruction pointer (RIP)** that initiated the syscall. EDR drivers monitor this:
+
+```
+Legitimate Windows API call:
+  User calls:  CreateFile() → NtCreateFile() → syscall
+  RIP at syscall: 0x7FFE0001234  (inside ntdll.dll) ✅ Normal
+
+Direct embedded syscall:
+  User calls:  SW4_NtCreateFile() → syscall
+  RIP at syscall: 0x140002500  (inside your PE) ⚠️ Suspicious!
+```
+
+EDRs can flag syscalls originating from outside `ntdll.dll` as potential hook bypasses.
+
+## Available Invocation Methods
+
+SysWhispers4 provides **4 different invocation techniques**:
+
+<CardGroup cols={2}>
+  <Card title="Embedded" icon="code" href="/cli/invocation-methods#embedded">
+    Direct syscall in your code. Fastest. RIP in your PE.
+  </Card>
+  <Card title="Indirect" icon="arrow-right" href="/cli/invocation-methods#indirect">
+    Jump to ntdll gadget. RIP in ntdll. Static gadget.
+  </Card>
+  <Card title="Randomized" icon="shuffle" href="/cli/invocation-methods#randomized">
+    Random gadget per call. RIP in ntdll. Maximum entropy.
+  </Card>
+  <Card title="Egg Hunt" icon="egg" href="/cli/invocation-methods#egg-hunt">
+    No syscall on disk. Runtime patching. Zero static signature.
+  </Card>
+</CardGroup>
+
+## Method Comparison
+
+| Method | RIP in ntdll | Syscall on Disk | Random per Call | Speed | Stealth |
+|--------|:------------:|:---------------:|:---------------:|:-----:|:-------:|
+| Embedded | ❌ | ✅ | ❌ | Fastest | Low |
+| Indirect | ✅ | ❌ | ❌ | Fast | High |
+| Randomized | ✅ | ❌ | ✅ (64 gadgets) | Fast | Very High |
+| Egg Hunt | ❌ | ❌ | ❌ | Medium | Very High |
+
+<Info>
+**Embedded** = `syscall` instruction lives in your stub  
+**Indirect** = Jump to `syscall;ret` gadget in ntdll  
+**Randomized** = Pick random gadget from pool of 64  
+**Egg Hunt** = Replace runtime egg with `syscall`
+</Info>
+
+## Embedded: Direct Syscall
+
+The `syscall` instruction is compiled directly into your generated stub:
+
+```asm
+SW4_NtAllocateVirtualMemory PROC
+    mov r10, rcx               ; Windows x64 calling convention
+    mov eax, [SW4_SsnTable+N]  ; Load SSN
+    syscall                    ; ← syscall is HERE, in your PE
+    ret
+SW4_NtAllocateVirtualMemory ENDP
+```
+
+**Pros:**
+- Simplest implementation
+- No ntdll dependency
+- Fastest execution
+
+**Cons:**
+- `syscall` opcode (`0F 05`) visible in your binary on disk
+- RIP points to your PE at kernel entry — detectable by EDR
+
+**Use when:** Quick testing, CTF challenges, or environments without kernel-mode EDR monitoring.
+
+## Indirect: ntdll Gadget
+
+Your stub jumps to a pre-located `syscall;ret` gadget **inside ntdll.dll**:
+
+```asm
+SW4_NtAllocateVirtualMemory PROC
+    mov r10, rcx
+    mov eax, [SW4_SsnTable+N]
+    jmp QWORD PTR [SW4_Gadget]  ; Jump to syscall inside ntdll
+SW4_NtAllocateVirtualMemory ENDP
+```
+
+At kernel entry, RIP = address inside ntdll — identical to a normal Windows API call.
+
+**Pros:**
+- RIP appears inside ntdll.dll (legitimate)
+- No `syscall` opcode in your binary on disk
+- Bypasses simple "syscall from non-ntdll" detection
+
+**Cons:**
+- Static gadget address can be fingerprinted by EDR
+- Requires ntdll to remain mapped
+
+**Use when:** Standard red team operations against commercial EDR.
+
+<Tip>
+Indirect invocation is the **recommended default** for production red team tools.
+</Tip>
+
+## Randomized: Entropy per Call
+
+Like Indirect, but selects a **different random gadget** from a pool of up to 64 on every syscall:
+
+```asm
+SW4_NtAllocateVirtualMemory PROC
+    mov r10, rcx
+    mov r11, rdx               ; Save rdx (rdtsc trashes it)
+    rdtsc                      ; Read CPU timestamp counter
+    xor eax, edx               ; Mix high/low
+    and eax, 63                ; Modulo 64 → index 0..63
+    lea rcx, [SW4_GadgetPool]
+    mov rcx, [rcx + rax*8]     ; Load random gadget address
+    mov rdx, r11               ; Restore rdx
+    mov eax, [SW4_SsnTable+N]
+    jmp rcx                    ; Jump to RANDOM ntdll gadget
+SW4_NtAllocateVirtualMemory ENDP
+```
+
+**Pros:**
+- RIP inside ntdll (legitimate)
+- Different gadget every call — defeats EDR whitelisting
+- Uses `RDTSC` for entropy (no API calls)
+- No `syscall` opcode in your binary
+
+**Cons:**
+- Slightly slower than Indirect (RDTSC + array lookup)
+- More complex stub code
+
+**Use when:** Evading advanced EDR that fingerprints specific syscall gadget addresses.
+
+<Warning>
+SysWhispers3's randomized method had a bug where `RDTSC` clobbered `rdx` (second argument). SysWhispers4 correctly saves/restores `rdx` via `r11`.
+</Warning>
+
+## Egg Hunt: No Syscall on Disk
+
+Stubs contain a **random 8-byte egg marker** instead of `syscall`. At runtime, `SW4_HatchEggs()` scans your `.text` section and replaces eggs with `0F 05 90 90 90 90 90 90`:
+
+```asm
+; At compile time:
+SW4_NtAllocateVirtualMemory PROC
+    mov r10, rcx
+    mov eax, [SW4_SsnTable+N]
+    DB 0DEh, 0ADh, 0BEh, 0EFh, 0CAh, 0FEh, 0BAh, 0BEh  ; Egg
+    ret
+SW4_NtAllocateVirtualMemory ENDP
+
+; After SW4_HatchEggs() at runtime:
+;   DB 0Fh, 05h, 90h, 90h, 90h, 90h, 90h, 90h  ; syscall + nops
+```
+
+**Initialization:**
+```c
+int main(void) {
+    SW4_Initialize();    // Resolve SSNs
+    SW4_HatchEggs();     // Replace eggs with syscall opcodes
+
+    // Now safe to call syscalls
+    SW4_NtAllocateVirtualMemory(...);
+}
+```
+
+**Pros:**
+- Zero `syscall` opcodes in binary on disk
+- Defeats static signature scanning
+- Works with or without ntdll
+
+**Cons:**
+- Requires `.text` section to be writable at runtime (VirtualProtect)
+- RIP still points to your PE (detectable by kernel EDR)
+- Slower initialization
+
+**Use when:** Evading static YARA rules or disk-based signature scanners.
+
+## Choosing the Right Method
+
+### For Quick Testing
+```bash
+python syswhispers.py --preset common --method embedded
+```
+Fastest and simplest. Use in lab environments.
+
+### For Standard Red Team Operations
+```bash
+python syswhispers.py --preset injection --method indirect
+```
+RIP inside ntdll. Recommended default.
+
+### Against Advanced EDR with Gadget Fingerprinting
+```bash
+python syswhispers.py --preset stealth --method randomized
+```
+Random gadget per call. Maximum runtime entropy.
+
+### To Evade Static Signature Scanning
+```bash
+python syswhispers.py --preset evasion --method egg
+```
+No `syscall` opcode on disk. Runtime patching.
+
+### Maximum Stealth (Randomized + Stack Spoofing)
+```bash
+python syswhispers.py --preset stealth \
+    --method randomized \
+    --resolve recycled \
+    --stack-spoof
+```
+Combines randomized gadgets with synthetic call stack for maximum evasion.
+
+## Detection Landscape
+
+| Detection Vector | Embedded | Indirect | Randomized | Egg |
+|-----------------|:--------:|:--------:|:----------:|:---:|
+| User-mode hook bypass | ✅ | ✅ | ✅ | ✅ |
+| RIP inside ntdll | ❌ | ✅ | ✅ | ❌ |
+| Static `syscall` signature | ⚠️¹ | ✅ | ✅ | ✅ |
+| Gadget fingerprinting | N/A | ⚠️ Static | ✅ Random | N/A |
+| Kernel ETW-Ti | ❌ | ❌ | ❌ | ❌ |
+
+¹ Syscall is in your code, not ntdll — different detection profile.
+
+<Warning>
+**Kernel-mode ETW-Ti** (`Microsoft-Windows-Threat-Intelligence`) monitors syscalls at the kernel level and logs them regardless of invocation method. No user-mode technique bypasses kernel telemetry without kernel access.
+</Warning>
+
+## Learn More
+
+<CardGroup cols={2}>
+  <Card title="Detailed Method Reference" icon="book" href="/cli/invocation-methods">
+    Complete technical documentation and usage examples for all invocation methods.
+  </Card>
+  <Card title="Stack Spoofing" icon="layer-group" href="/advanced/stack-spoofing">
+    Synthetic call stack frames to evade stack-walking EDR analysis.
+  </Card>
+  <Card title="EDR Detection Vectors" icon="radar" href="/advanced/edr-detection">
+    Comprehensive analysis of what EDR products can and cannot detect.
+  </Card>
+  <Card title="ETW-Ti Limitations" icon="shield-halved" href="/advanced/etw-ti-limitations">
+    Understanding kernel-mode telemetry that cannot be bypassed from user-mode.
+  </Card>
+</CardGroup>

